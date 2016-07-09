@@ -12,6 +12,14 @@ typedef struct alias {
 
 alias *al_ent[HASH_MAX];
 
+int hash_fun(char *inp);
+static inline void my_strcpy(char *dst, const char *src, char null_flag);
+void shift_str(char *str, int n);
+void repl_str(char *pat, char *rep, char **start_pat);
+alias **al_src(char *al_name);
+int al_ins(alias **al_at, char *al_name, char *al_trans);
+void alias_me(char **cmd);
+
 int hash_fun(char *inp)
 {
 	int sum;

@@ -5,7 +5,7 @@
 #include <sys/wait.h>
 #include <stdio.h>
 #include <unistd.h>
-#include "alias.c"
+#include "alias.h"
 
 #define ERR(e)do {						\
 	fprintf(stderr, "%s @ ", __FILE__); \
@@ -141,6 +141,8 @@ void redir_me(char **cmd, int redir_fd, char *redir_dst, char ap_flag)
 
 int builtin(char **cmd)
 {
+	int err;
+
 	if (cmd[0]) {
 		switch (*cmd[0]) {
 		case 'a' :
@@ -155,13 +157,16 @@ int builtin(char **cmd)
 					chdir(getenv("HOME"));
 					return 1;
 				}
-				if (strcmp(cmd[1], "..") && errno==ENOENT) {
-					fprintf(stderr, "\ncd : Not here..");
-					return 1;
-				}
-				if (chdir(cmd[1])<0 && errno!=ENOENT) {
+
+				if (chdir(cmd[1])<0 && ((err=errno) != ENOENT)) {
 					ERR("chdir");
 				}
+
+				if (strcmp(cmd[1], "..") && err==ENOENT) {
+					fprintf(stderr, "cd : Not here..\n");
+					return 1;
+				}
+				
 				return 1;
 			}
 			break;
@@ -190,13 +195,12 @@ void exec_me(char **cmd)
 		ERR("execvp");
 	}
 	if(!bg_flag) {
+		/* sleep(1); */
 		if (wait(NULL) < 0) /* waits for child */
 			ERR("wait");
 	}
 	else {
-		printf("\nAdded to FG");
-		/* bg_flag = 0; */
-		return;
+		printf("\nAdded to FG\n");
 	}
 }
 
@@ -247,7 +251,7 @@ int main()
 
 	setbuf(stdout, NULL);
 	while (1) {
-		printf("\nSH>");
+		printf("SH>");
 		fgets(inp, 4096, stdin);
 		is_bg(inp);
 		eval(inp);
