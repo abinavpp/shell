@@ -6,26 +6,22 @@
 #include <stdio.h>
 #include <unistd.h>
 #include "alias.h"
+#include "util.h"
 
-#define ERR(e)do {						\
-	fprintf(stderr, "%s @ ", __FILE__); \
-	fprintf(stderr, "%u\n", __LINE__);	\
-	perror(e);							\
-	exit(1);} while (0);				\
+static void is_bg(char *inp);
+static void tokenize(char **inp, char *delim);
+static char parse_cmd(char **inp, char **cmd, int start_ind);
+static char is_redir(char **cmd, char **dst, char *ap_flag);
+static void redir_me(char **cmd, int redir_fd, char *redir_dst, char ap_flag);
+static int builtin(char **cmd);
+static void exec_me(char **cmd);
+static void pipe_me(char **cmd, char **inp, char *delim);
+static void eval(char *inp);
+static int is_quoted(char *str);
 
-void is_bg(char *inp);
-void tokenize(char **inp, char *delim);
-char parse_cmd(char **inp, char **cmd, int start_ind);
-char is_redir(char **cmd, char **dst, char *ap_flag);
-void redir_me(char **cmd, int redir_fd, char *redir_dst, char ap_flag);
-int builtin(char **cmd);
-void exec_me(char **cmd);
-void pipe_me(char **cmd, char **inp, char *delim);
-void eval(char *inp);
+static int bg_flag = 0;
 
-int bg_flag = 0;
-
-void is_bg(char *inp)
+static void is_bg(char *inp)
 {
 	for (inp = inp+(strlen(inp)-2); *inp==' '; inp--)
 		;/* going back from end till non-space char */
@@ -34,7 +30,7 @@ void is_bg(char *inp)
 		*inp = ' ';
 }
 
-void tokenize(char **inp, char *delim)
+static void tokenize(char **inp, char *delim)
 {
 	char *start;
 
@@ -47,7 +43,7 @@ void tokenize(char **inp, char *delim)
 	}
 }
 
-char parse_cmd(char **inp, char **cmd, int start_ind)
+static char parse_cmd(char **inp, char **cmd, int start_ind)
 {
 	int i, len;
 	char delim; /* deals with delimiter for args/cmds of inp */
@@ -109,7 +105,7 @@ char parse_cmd(char **inp, char **cmd, int start_ind)
 	return delim; /* for verifying if this to be piped or bg'd etc */
 }
 
-char is_redir(char **cmd, char **dst, char *ap_flag)
+static char is_redir(char **cmd, char **dst, char *ap_flag)
 {
 	char ret;
 
@@ -128,7 +124,7 @@ char is_redir(char **cmd, char **dst, char *ap_flag)
 	return -1; /* no redir here */
 }
 
-void redir_me(char **cmd, int redir_fd, char *redir_dst, char ap_flag)
+static void redir_me(char **cmd, int redir_fd, char *redir_dst, char ap_flag)
 {
 	int dst_fd;
 
@@ -139,7 +135,7 @@ void redir_me(char **cmd, int redir_fd, char *redir_dst, char ap_flag)
 	dup2(dst_fd, redir_fd); /* now exec can be done */
 }
 
-int builtin(char **cmd)
+static int builtin(char **cmd)
 {
 	int err;
 
@@ -175,7 +171,7 @@ int builtin(char **cmd)
 	return 0;
 }
 
-void exec_me(char **cmd)
+static void exec_me(char **cmd)
 {
 	int pid;
 	char redir_fd, ap_flag;
@@ -204,7 +200,7 @@ void exec_me(char **cmd)
 	}
 }
 
-void pipe_me(char **cmd, char **inp, char *delim)
+static void pipe_me(char **cmd, char **inp, char *delim)
 {
 	int pipe_fd[2];
 
@@ -230,7 +226,7 @@ void pipe_me(char **cmd, char **inp, char *delim)
 }
 
 
-void eval(char *inp)
+static void eval(char *inp)
 {
 	char *cmd[256];
 	char delim;
@@ -244,17 +240,40 @@ void eval(char *inp)
 	/* cmds end in '\n' or '\0', i guess */
 }
 
+static int is_quoted(char *str)
+{
+	while (*str != '\0') {
+		while (*str!='\0' && *str!='\"' && *str!='\'')
+			str++;
+		if (str)
+			if ((str=strchr(str+1, *str)) == NULL)
+				return 0;
+			else
+				str++;
+	}
+	return 1;
+}
+
 int main()
 {
-	char inp[4096];
+	char *inp;
+	char cmd[MAX_LINE];
 	int i;
 
+	inp = cmd;
 	setbuf(stdout, NULL);
 	while (1) {
 		printf("SH>");
-		fgets(inp, 4096, stdin);
-		is_bg(inp);
-		eval(inp);
+		fgets(cmd, MAX_LINE, stdin);
+		while (!is_quoted(cmd)) {
+			inp = strchr(inp, '\n');
+			printf(" >");
+			fgets(inp, MAX_LINE, stdin);
+		}
+		inp = cmd;
+		is_bg(cmd);
+		eval(cmd);
+		memset(cmd, 0, MAX_LINE);
 	}
 	
 }
