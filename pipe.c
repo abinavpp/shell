@@ -84,7 +84,7 @@ static char parse_cmd(char **inp, char **cmd, int start_ind)
 					strcpy(temp_arg, start_arg);
 					**inp = delim; /* so that repl_str works till actual '\0' of cmdline */
 					*inp = *inp - len; /* goes back to start_arg */
-					repl_str(temp_arg, (*al_cur)->trans, inp); /* alias trans is done here */
+					repl_str(temp_arg, (*al_cur)->trans, *inp); /* alias trans is done here */
 					tokenize(inp, &delim); /* the modified token after alias is delimited with
 											  '\0'and its following delim becomes the new delim,
 											  inp points to end of token */
@@ -163,6 +163,12 @@ static int builtin(char **cmd)
 					return 1;
 				}
 				
+				return 1;
+			}
+			break;
+		case 'v' :
+			if (!strcmp(cmd[0], "var")) {
+
 				return 1;
 			}
 			break;
@@ -254,6 +260,20 @@ static int is_quoted(char *str)
 	return 1;
 }
 
+static void tilde_exp(char *inp)
+{
+	char home[PATH_MAX];
+	int home_l;
+
+	strcpy(home, getenv("HOME"));
+	home_l = strlen(home);
+
+	while ((inp=strchr(inp, '~')) != NULL) {
+		repl_str("~", home, inp);
+		inp += home_l;
+	}
+}
+
 int main()
 {
 	char *inp;
@@ -271,6 +291,7 @@ int main()
 			fgets(inp, MAX_LINE, stdin);
 		}
 		inp = cmd;
+		tilde_exp(inp);
 		is_bg(cmd);
 		eval(cmd);
 		memset(cmd, 0, MAX_LINE);
