@@ -1,3 +1,6 @@
 a.out
+shell
+temp
 *.swp
 *.o
+obj/

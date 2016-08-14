@@ -2,7 +2,10 @@
 #define UTILH
 
 #define HASH_MAX 		100
-#define MAX_LINE		4096 
+#define PRMT_MAX		128
+#define ARG_MAX			256
+#define PATH_MAX		4096
+#define LINE_MAX		4096 
 
 #define ERR(e)do {						\
 	fprintf(stderr, "%s @ ", __FILE__); \
@@ -10,9 +13,15 @@
 	perror(e);							\
 	exit(1);} while (0);				\
 
+#define ERRMSG(e)do {						\
+	fprintf(stderr, "%s @ ", __FILE__); \
+	fprintf(stderr, "%u\n", __LINE__);	\
+	fprintf(stderr, (e));				\
+	return -1;} while (0);				\
+
 extern int hash_fun(char *inp);
 extern void shift_str(char *str, int n);
-extern void repl_str(char *pat, char *rep, char **start_pat);
+extern void repl_str(char *pat, char *rep, char *start_pat);
 extern void my_strcpy(char *dst, const char *src, char null_flag);
 
 #endif

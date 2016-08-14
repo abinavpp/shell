@@ -8,6 +8,11 @@
 #include "alias.h"
 #include "util.h"
 
+#define CHILD_DELIM(c)	((c) == ' ')
+#define PARENT_DELIM(c)	((c)=='|' || (c)==';')
+#define GRAND_DELIM(c)	((c)=='\n')
+#define QUOTE(c)		((c)=='\'' || (c)=='\"')
+
 static void is_bg(char *inp);
 static void tokenize(char **inp, char *delim);
 static char parse_cmd(char **inp, char **cmd, int start_ind);
@@ -18,9 +23,21 @@ static void exec_me(char **cmd);
 static void pipe_me(char **cmd, char **inp, char *delim);
 static void eval(char *inp);
 static int is_quoted(char *str);
+static void aliasize(char *start_arg, char *delim, char **inp);
 
-static int bg_flag = 0;
+static int bg_flag = 0; /* To bg or not to , thats the question */
 
+/* this marks the location at cmdline till alias blacklisting is done */
+static char *al_deadend;
+/* head of the singly linked list of alias blacklist to avoid nasty
+ * recurisive alias cases, like alias "ls=ls;ls" */
+static alias *al_blist;
+
+static char ps1[PRMT_MAX] = "ASH>";
+static char ps2[PRMT_MAX] = " >";
+/* nah no ps3 or ps4 in my shell */
+
+/* sets the global bg_flag as per inp, ie cmdline */
 static void is_bg(char *inp)
 {
 	for (inp = inp+(strlen(inp)-2); *inp==' '; inp--)
@@ -30,12 +47,15 @@ static void is_bg(char *inp)
 		*inp = ' ';
 }
 
+/* pushes inp to end of token and nullifies that byte */
 static void tokenize(char **inp, char *delim)
 {
-	char *start;
 
-	for (start=*inp; **inp != '\0'; (*inp)++) {
-		if (**inp==' ' || **inp=='|' || **inp=='\n' || **inp==';') {
+	for (; **inp != '\0'; (*inp)++) {
+		if (QUOTE(**inp)) {
+			*inp = strchr(*inp+1, **inp);
+		}
+		if (CHILD_DELIM(**inp) || PARENT_DELIM(**inp) || GRAND_DELIM(**inp)) {
 			*delim = **inp;
 			**inp = '\0'; /* crafted the token */
 			break;
@@ -43,16 +63,55 @@ static void tokenize(char **inp, char *delim)
 	}
 }
 
+/* the start of iterative alias expansion fixed at start_arg location 
+ * inp will point accordingly but start_arg remains */
+static void aliasize(char *start_arg, char *delim, char **inp)
+{
+	int len;
+	alias *al_cur;
+	char al_arg[ARG_MAX];
+
+	if (start_arg >= al_deadend) {
+		/* no blacklisting since we crossed the deadend, so freeing the list */
+		al_lin_free(&al_blist);
+	}
+
+	while (al_cur = is_alias(start_arg )) {
+		if (al_lin_src(start_arg, al_blist) == NULL) {
+			/* this is not a blacklisted one, hence alias it */
+			al_lin_ins(start_arg, &al_blist); /* but from now till deadend it is */
+			len = strlen(start_arg);
+			strcpy(al_arg, start_arg);
+			**inp = *delim; /* so that repl_str works till actual '\0' of cmdline */
+			repl_str(al_arg, al_cur->trans, start_arg); /* alias trans is done here */
+
+			if (al_deadend == NULL)
+				al_deadend = start_arg + strlen(al_cur->trans);
+			else
+				al_deadend = al_deadend + ALIAS_DIFF(al_cur);
+			
+			/* this MUST happen so that we leave things how the parser wants after expansion */
+			*inp = *inp - len; 
+			tokenize(inp, delim); /* the MODIFIED token after alias is delimited with
+							  '\0'and its following delim becomes the new delim,
+							  inp points to end of first token after alias transition */
+		}
+		/* break if aliasing the blacklisted alias */
+		else {
+			break;
+		}
+	}
+}
+
+/* the god-forsaken parser!!! */
 static char parse_cmd(char **inp, char **cmd, int start_ind)
 {
-	int i, len;
+	int i; /* main index for cmd array for exec */
 	char delim; /* deals with delimiter for args/cmds of inp */
-	char *start_arg; /* keeps track of args/cmds of inp */
-	char temp_arg[4096]; /* used in alias */
-	alias **al_cur; /* alias pointer */
+	char *start_arg; /* keeps track of args/tokens of inp */
 
-	i = start_ind; /* no FUCKING clue why i have to do this, can't use 
-					  start_ind, it fucks up on piping */
+	i = start_ind; /* no EFFING clue why i have to do this, can't use 
+					  start_ind, it screws up on piping */
 	if (!(**inp)) /* NULL string */
 		return 0;
 
@@ -61,43 +120,35 @@ static char parse_cmd(char **inp, char **cmd, int start_ind)
 
 	for (start_arg=*inp; **inp!='\0'; (*inp)++) {
 		/* quoted arg is taken as one */
-		if (**inp == '\"' || **inp == '\'') {
+		if (QUOTE(**inp)) {
 			delim = **inp;
 			cmd[i++] = ++(*inp);
 			*inp = strchr(*inp, delim);
 			**inp = '\0'; /* cmd[i] points till here */
-			start_arg = *inp + 1; /* points to the next arg/cmd */
+			start_arg = *inp + 1; /* points to the next arg */
 		}
-		if (**inp==' ' || **inp=='|' || **inp=='\n' || **inp==';') {
+		if (CHILD_DELIM(**inp) || PARENT_DELIM(**inp) || GRAND_DELIM(**inp)) {
+		/* now this might be one cmd or an arg of a cmd */
 			delim = **inp;
 			**inp = '\0'; /* now cmd[i] can point till here */
 
-			/* start_arg can be NULL if multiple spaces are dealt with
+			/* start_arg can be NULL, for eg if multiple spaces are dealt with
 			 * in which the above line nullify start_arg itself which
 			 * is an 'ok' way to skip the bloody spaces */
 
 			if (*start_arg) {
-				while (*(al_cur = al_src(start_arg))) {
-					len = strlen(start_arg); /* if strlen is used for below's exp
-												massive coredump will follow,
-											   	mysteries of OS here */
-					strcpy(temp_arg, start_arg);
-					**inp = delim; /* so that repl_str works till actual '\0' of cmdline */
-					*inp = *inp - len; /* goes back to start_arg */
-					repl_str(temp_arg, (*al_cur)->trans, *inp); /* alias trans is done here */
-					tokenize(inp, &delim); /* the modified token after alias is delimited with
-											  '\0'and its following delim becomes the new delim,
-											  inp points to end of token */
-					if (!strcmp((*al_cur)->name, start_arg))
-						break; /* so that it doesn't alias the same over and over again */
-				}
+				if (is_alias(start_arg))
+					aliasize(start_arg, &delim, inp);
 				cmd[i++] = start_arg;
 			}
-			if (delim == '|' || delim == '\n' || delim == ';') {
+
+			if (PARENT_DELIM(delim) || GRAND_DELIM(delim)) {
 				(*inp)++; /* so that main inp str points to the next */
-				break; /* reached the end of ONE command */
+				/* break doesn't do the for loop increment, hence the above stmt */
+				break; /* reached the end of ONE command, job well done people */
 			}
-			start_arg = *inp + 1; /* points to the next arg/cmd */
+			/* if child delimiter */
+			start_arg = *inp + 1; /* points to the next arg/token */
 		}
 	}
 
@@ -105,6 +156,7 @@ static char parse_cmd(char **inp, char **cmd, int start_ind)
 	return delim; /* for verifying if this to be piped or bg'd etc */
 }
 
+/* return type of redir and sets ap_flag (append flag) */
 static char is_redir(char **cmd, char **dst, char *ap_flag)
 {
 	char ret;
@@ -124,6 +176,7 @@ static char is_redir(char **cmd, char **dst, char *ap_flag)
 	return -1; /* no redir here */
 }
 
+/* sets up fd to do the redir */
 static void redir_me(char **cmd, int redir_fd, char *redir_dst, char ap_flag)
 {
 	int dst_fd;
@@ -135,6 +188,7 @@ static void redir_me(char **cmd, int redir_fd, char *redir_dst, char ap_flag)
 	dup2(dst_fd, redir_fd); /* now exec can be done */
 }
 
+/* does shell builtins, hopefully */
 static int builtin(char **cmd)
 {
 	int err;
@@ -168,7 +222,6 @@ static int builtin(char **cmd)
 			break;
 		case 'v' :
 			if (!strcmp(cmd[0], "var")) {
-
 				return 1;
 			}
 			break;
@@ -177,6 +230,7 @@ static int builtin(char **cmd)
 	return 0;
 }
 
+/* regular fork and exec routine with a shell twist */
 static void exec_me(char **cmd)
 {
 	int pid;
@@ -206,11 +260,12 @@ static void exec_me(char **cmd)
 	}
 }
 
+/* piper */
 static void pipe_me(char **cmd, char **inp, char *delim)
 {
 	int pipe_fd[2];
 
-	int stdin_fd, stdout_fd;
+	int stdin_fd;
 
 	dup2(STDIN_FILENO, stdin_fd); /* saves orig stdin of parent */
 
@@ -231,35 +286,39 @@ static void pipe_me(char **cmd, char **inp, char *delim)
 	dup2(stdin_fd, STDIN_FILENO); /* restores the orig stdin for parent */
 }
 
-
+/* where it all starts */
 static void eval(char *inp)
 {
-	char *cmd[256];
-	char delim;
+	char *cmd[ARG_MAX]; /* main cmd array for exec */
+	char delim; /* delim between cmds */
 
 	do {
 		if ((delim = parse_cmd(&inp, cmd, 0)) == '|')
 			pipe_me(cmd, &inp, &delim);
-		else
+		else	
 			exec_me(cmd); /* this will handle redir as well */
 	} while (delim != '\0' && delim != '\n');
-	/* cmds end in '\n' or '\0', i guess */
+	/* main cmdline end in '\n' or '\0', i guess.. */
+	al_deadend = NULL; /* re-initiating it for a new cmdline */
 }
 
+/* checks if PS2 is required */
 static int is_quoted(char *str)
 {
 	while (*str != '\0') {
 		while (*str!='\0' && *str!='\"' && *str!='\'')
 			str++;
-		if (str)
+		if (str) {
 			if ((str=strchr(str+1, *str)) == NULL)
 				return 0;
 			else
 				str++;
+		}
 	}
 	return 1;
 }
 
+/* ~ becomes $HOME */
 static void tilde_exp(char *inp)
 {
 	char home[PATH_MAX];
@@ -268,33 +327,40 @@ static void tilde_exp(char *inp)
 	strcpy(home, getenv("HOME"));
 	home_l = strlen(home);
 
-	while ((inp=strchr(inp, '~')) != NULL) {
-		repl_str("~", home, inp);
-		inp += home_l;
+	for (; *inp!='\0'; inp++) {
+		if (QUOTE(*inp)) {
+			inp = strchr(inp+1, *inp);
+			continue;
+		}
+		if (*inp == '~') {
+			repl_str("~", home, inp);
+			inp += home_l - 1;
+		}
 	}
 }
 
 int main()
 {
-	char *inp;
-	char cmd[MAX_LINE];
-	int i;
+	char *inp; /* points to where input is done on main command line */
+	char cmd[LINE_MAX]; /* main command line */
 
 	inp = cmd;
+
 	setbuf(stdout, NULL);
+
 	while (1) {
-		printf("SH>");
-		fgets(cmd, MAX_LINE, stdin);
+		printf("%s", ps1);
+		fgets(inp, LINE_MAX, stdin);
 		while (!is_quoted(cmd)) {
 			inp = strchr(inp, '\n');
-			printf(" >");
-			fgets(inp, MAX_LINE, stdin);
+			printf("%s", ps2);
+			fgets(inp, LINE_MAX, stdin);
 		}
 		inp = cmd;
 		tilde_exp(inp);
-		is_bg(cmd);
-		eval(cmd);
-		memset(cmd, 0, MAX_LINE);
+		is_bg(inp);
+		eval(inp);
+		memset(inp, 0, LINE_MAX);
 	}
 	
 }

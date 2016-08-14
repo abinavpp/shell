@@ -29,7 +29,7 @@ void shift_str(char *str, int n)
 	}
 }
 
-void repl_str(char *pat, char *rep, char **start_pat)
+void repl_str(char *pat, char *rep, char *start_pat)
 {
 	int len_pat, len_rep, len_diff;
 
@@ -38,8 +38,8 @@ void repl_str(char *pat, char *rep, char **start_pat)
 	len_diff = len_rep-len_pat;
 	/* only if we get the pattern */
 	if (start_pat != NULL) {
-		shift_str(*start_pat+len_pat, len_diff); /* shift only the stuff after the pattern */
-		my_strcpy(*start_pat, rep, 0); /* just copy the rep without \0 at end */
+		shift_str(start_pat+len_pat, len_diff); /* shift only the stuff after the pattern */
+		my_strcpy(start_pat, rep, 0); /* just copy the rep without \0 at end */
 	}
 	
 }
