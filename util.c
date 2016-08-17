@@ -1,4 +1,7 @@
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include "util.h"
 
 int hash_fun(char *inp)
@@ -43,3 +46,17 @@ void repl_str(char *pat, char *rep, char *start_pat)
 	}
 	
 }
+
+char *int_till_txt(char *inp, int *res)
+{
+	char delim, *start_inp;
+
+	for (start_inp=inp; isdigit(*inp); inp++)
+		;
+	delim = *inp;
+	*inp = '\0';
+	*res = atoi(start_inp);
+	*inp = delim;
+	return inp;
+}
+

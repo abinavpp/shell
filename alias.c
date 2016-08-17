@@ -72,7 +72,16 @@ void al_ins(alias **al_at, char *al_name, char *al_trans)
 
 void alias_me(char **cmd)
 {
-	char *al_name, *al_trans, *temp;
+	char *al_name, *al_trans;
+	alias *al_cur;
+
+	if (!strchr(cmd[1], '=')) {
+		if ((al_cur=is_alias(cmd[1])))
+			printf("%s is aliased with %s\n", cmd[1], al_cur->trans);
+		else
+			printf("%s is not aliased\n", cmd[1]);
+		return;
+	}
 
 	for (al_name = cmd[1]; *cmd[1]!='\0' && *cmd[1]!='=';) {
 		if (*cmd[1] == ' ')

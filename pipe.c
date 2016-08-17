@@ -16,8 +16,8 @@
 static void is_bg(char *inp);
 static void tokenize(char **inp, char *delim);
 static char parse_cmd(char **inp, char **cmd, int start_ind);
-static char is_redir(char **cmd, char **dst, char *ap_flag);
-static void redir_me(char **cmd, int redir_fd, char *redir_dst, char ap_flag);
+static void do_redir(char **cmd);
+static void redir_me(int redir_fd, char *redir_dst, int ap_flag);
 static int builtin(char **cmd);
 static void exec_me(char **cmd);
 static void pipe_me(char **cmd, char **inp, char *delim);
@@ -76,7 +76,7 @@ static void aliasize(char *start_arg, char *delim, char **inp)
 		al_lin_free(&al_blist);
 	}
 
-	while (al_cur = is_alias(start_arg )) {
+	while ((al_cur = is_alias(start_arg ))) {
 		if (al_lin_src(start_arg, al_blist) == NULL) {
 			/* this is not a blacklisted one, hence alias it */
 			al_lin_ins(start_arg, &al_blist); /* but from now till deadend it is */
@@ -157,35 +157,60 @@ static char parse_cmd(char **inp, char **cmd, int start_ind)
 }
 
 /* return type of redir and sets ap_flag (append flag) */
-static char is_redir(char **cmd, char **dst, char *ap_flag)
+static void do_redir(char **cmd)
 {
-	char ret;
+	int redir_fd, ap_flag, null_flag;
+	char *redir_tok, *redir_dst;
 
+	null_flag = 1;
 	while (*cmd != NULL) {
-		ret = **cmd;
-		if (ret=='1' || ret=='2')
-			if (*(*cmd+1) == '>') {
-				*dst = *(cmd+1); /* the next arg */
-				*ap_flag = (*(*cmd+2) == '>') ? 1 : 0;
+		redir_tok = int_till_txt(*cmd, &redir_fd);
+		if (redir_fd >= 1) {
+			if (*redir_tok == '>') {
+				/* redir_dst can be filename or can be NULL(which will fail at redir_me) */
+				redir_dst = *(cmd+1);
+				ap_flag = (*(redir_tok+1) == '>') ? 1 : 0;
 				/* append flag and dst set */
-				*cmd = NULL; /* so that execvp will be happy */
-				return ret - 0x30; /* ascii to dec */
+				redir_me(redir_fd, redir_dst, ap_flag);
+				if (null_flag) {
+					*cmd = NULL;
+					null_flag = 0;
+				}
 			}
+		}
 		cmd = cmd+1; /* next arg */
 	}
-	return -1; /* no redir here */
 }
 
 /* sets up fd to do the redir */
-static void redir_me(char **cmd, int redir_fd, char *redir_dst, char ap_flag)
+static void redir_me(int redir_fd, char *redir_dst, int ap_flag)
 {
 	int dst_fd;
 
-	if (!ap_flag) /* don't append the output */
-		dst_fd = creat(redir_dst, 0644);
-	else /* append the output */
-		dst_fd = open(redir_dst, O_RDWR | O_APPEND);
-	dup2(dst_fd, redir_fd); /* now exec can be done */
+	if (!redir_dst) {
+		ERRMSG("Error redirecting\n");
+		return;
+	}
+
+	if (!ap_flag) {/* don't append the output */
+		if ((dst_fd=creat(redir_dst, 0644)) < 0) {
+			ERR("creat");
+			return;
+		}
+	}
+
+	else {/* append the output */
+		if ((dst_fd=open(redir_dst, O_RDWR | O_APPEND)) < 0) {
+			ERR("open");
+			return;
+		}
+	}
+
+	/* now exec can be done */
+	if (dup2(dst_fd, redir_fd) < 0) { 
+		ERR("dup2");
+		return;
+	} 
 }
 
 /* does shell builtins, hopefully */
@@ -210,10 +235,12 @@ static int builtin(char **cmd)
 
 				if (chdir(cmd[1])<0 && ((err=errno) != ENOENT)) {
 					ERR("chdir");
+					exit(EXIT_FAILURE);
 				}
 
 				if (strcmp(cmd[1], "..") && err==ENOENT) {
 					fprintf(stderr, "cd : Not here..\n");
+					err = 0;
 					return 1;
 				}
 				
@@ -233,9 +260,9 @@ static int builtin(char **cmd)
 /* regular fork and exec routine with a shell twist */
 static void exec_me(char **cmd)
 {
-	int pid;
-	char redir_fd, ap_flag;
-	char *redir_dst;
+	int pid, redir_fd, ap_flag;
+	char red_dst[PATH_MAX];
+	char *redir_dst = red_dst;
 	
 
 	if (builtin(cmd))
@@ -244,16 +271,19 @@ static void exec_me(char **cmd)
 	if ((pid = fork()) < 0)
 		ERR("fork");
 	if (!pid) {
-		/* check if this cmd need redirection */
-		if ((redir_fd=is_redir(cmd, &redir_dst, &ap_flag)) != -1)
-			redir_me(cmd, redir_fd, redir_dst, ap_flag);
+		/* check if this cmd need redirection and do the necessary */
+		do_redir(cmd);
+		/* after execvp OS should close the new fd made for redirection if any */
 		execvp(cmd[0], cmd);
 		ERR("execvp");
+		exit(EXIT_FAILURE);
 	}
 	if(!bg_flag) {
 		/* sleep(1); */
-		if (wait(NULL) < 0) /* waits for child */
+		if (wait(NULL) < 0) /* waits for child */{
 			ERR("wait");
+			exit(EXIT_FAILURE);
+		}
 	}
 	else {
 		printf("\nAdded to FG\n");
@@ -263,27 +293,49 @@ static void exec_me(char **cmd)
 /* piper */
 static void pipe_me(char **cmd, char **inp, char *delim)
 {
-	int pipe_fd[2];
+	int pipe_fd[2], stdin_fd;
 
-	int stdin_fd;
-
-	dup2(STDIN_FILENO, stdin_fd); /* saves orig stdin of parent */
+	stdin_fd = dup(STDIN_FILENO); /* saves the orig stdin */
 
 	while (*delim == '|') { /* there is more to pipe */
 		pipe(pipe_fd);
+		/* printf("\n%d %d %d\n", stdin_fd, pipe_fd[0], pipe_fd[1]); */
 		if (!fork()) {
-			dup2(pipe_fd[1], STDOUT_FILENO);
+			/* The child is the reader and the writer of the pipe */
+			if (dup2(pipe_fd[1], STDOUT_FILENO) < 0) {
+				ERR("dup2");
+				exit(EXIT_FAILURE);
+			}
+			do_redir(cmd);
 			execvp(cmd[0], cmd); /* writes to pipe */
+			ERR("execvp");
+			exit(EXIT_FAILURE);
 		}
-		/* The child is the reader and the writer of the pipe */
-		wait(NULL); /* waits for child */
-		dup2(pipe_fd[0], STDIN_FILENO); /* sets up for read from pipe */
+		
+		if (wait(NULL) < 0) {
+			ERR("wait");
+			exit(EXIT_FAILURE);
+		}
 		close(pipe_fd[1]); /* so read from pipe by next child is fine */
+		/* sets up for 'read from pipe' for child */
+		if (dup2(pipe_fd[0], STDIN_FILENO) < 0) {
+			ERR("dup2");
+			exit(EXIT_FAILURE);
+		}
+		close(pipe_fd[0]);
 		*delim = parse_cmd(inp, cmd, 0);
 	}
 
 	exec_me(cmd); /* the final pipe cmd prints to STDOUT */
-	dup2(stdin_fd, STDIN_FILENO); /* restores the orig stdin for parent */
+
+	if (dup2(stdin_fd, STDIN_FILENO) < 0){ /* restores the orig stdin*/
+		ERR("dup2");
+		exit(EXIT_FAILURE);
+	}
+
+	close(stdin_fd);
+	close(pipe_fd[0]);
+	close(pipe_fd[1]);
 }
 
 /* where it all starts */
@@ -306,7 +358,7 @@ static void eval(char *inp)
 static int is_quoted(char *str)
 {
 	while (*str != '\0') {
-		while (*str!='\0' && *str!='\"' && *str!='\'')
+		while (*str!='\0' && !QUOTE(*str))
 			str++;
 		if (str) {
 			if ((str=strchr(str+1, *str)) == NULL)
