@@ -2,7 +2,30 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdarg.h>
+#include <unistd.h>
 #include "util.h"
+
+void clean_up(const char *str, ...)
+{
+	va_list ap;
+
+	va_start(ap, str);
+	while (*str != '\0') {
+		switch (*str++) {
+		case 'f' :
+			if (close(va_arg(ap, int)) < 0)
+				ERR_EXIT("close");
+			break;
+		case 'a' :
+			free(va_arg(ap, void*));
+			break;
+		default :
+			break;
+		}
+	}
+	va_end(ap);
+}
 
 int hash_fun(char *inp)
 {
@@ -47,16 +70,24 @@ void repl_str(char *pat, char *rep, char *start_pat)
 	
 }
 
-char *int_till_txt(char *inp, int *res)
+char *int_till_txt(char *str, int *res)
 {
-	char delim, *start_inp;
+	char *start_inp, s[LINE_MAX];
+	char *inp = s;
+	strcpy(inp, str);
 
-	for (start_inp=inp; isdigit(*inp); inp++)
+	for (start_inp=inp; isdigit(*inp); str++, inp++)
 		;
-	delim = *inp;
 	*inp = '\0';
 	*res = atoi(start_inp);
-	*inp = delim;
-	return inp;
+	return str;
 }
 
+void stringify(char *dst, char **src)
+{
+	for (; *src!= NULL; src+=1) {
+		strcpy(dst, *src);
+		dst += strlen(*src);
+		strcpy(dst++, " ");
+	}
+}

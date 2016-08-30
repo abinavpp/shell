@@ -4,7 +4,7 @@
 #include "alias.h"
 #include "util.h"
 
-alias *al_ent[HASH_MAX];
+static alias *al_ent[HASH_MAX];
 
 alias *is_alias(char *al_name)
 {
