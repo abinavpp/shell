@@ -1,5 +1,5 @@
 CC := gcc
-CFLAGS ?=
+CFLAGS ?= -g
 
 OBJDIR = obj/
 PREFIX ?= /usr/local/bin
