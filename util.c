@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <stdarg.h>
 #include <unistd.h>
+
 #include "util.h"
 
 void clean_up(const char *str, ...)
@@ -37,12 +38,12 @@ int hash_fun(char *inp)
 }
 
 /* null flag decides whether to append '\0' or not */
-void my_strcpy(char *dst, const char *src, char null_flag)
+void astrcpy(char *dst, const char *src, int len, char null_flag)
 {
-	while (*src != '\0')
-		*dst++ = *src++;
-	if (null_flag)
-		*dst = '\0';
+	strncpy(dst, src, len);
+	if (null_flag) {
+		*(dst+len) = '\0';
+	}
 }
 
 void shift_str(char *str, int n)
@@ -50,22 +51,23 @@ void shift_str(char *str, int n)
 	char temp_str[strlen(str)]; /* stores orig str */
 
 	if (n) { /* else don't shift */
-		my_strcpy(temp_str, str, 1);
-		my_strcpy(str+n, temp_str, 1); /* everything that's skipped here is non relevant */
+		astrcpy(temp_str, str, strlen(str), 1);
+		/* everything that's skipped here is non relevant */
+		astrcpy(str+n, temp_str, strlen(temp_str), 1);
 	}
 }
 
 void repl_str(char *pat, char *rep, char *start_pat)
 {
-	int len_pat, len_rep, len_diff;
+	int len_pat , len_rep, len_diff;
 
 	len_pat = strlen(pat);
 	len_rep = strlen(rep);
 	len_diff = len_rep-len_pat;
 	/* only if we get the pattern */
-	if (start_pat != NULL) {
+	if (start_pat) {
 		shift_str(start_pat+len_pat, len_diff); /* shift only the stuff after the pattern */
-		my_strcpy(start_pat, rep, 0); /* just copy the rep without \0 at end */
+		astrcpy(start_pat, rep, len_rep, 0); /* just copy the rep without \0 at end */
 	}
 	
 }
@@ -74,7 +76,7 @@ char *int_till_txt(char *str, int *res)
 {
 	char *start_inp, s[LINE_MAX];
 	char *inp = s;
-	strcpy(inp, str);
+	astrcpy(inp, str, strlen(str), 1);
 
 	for (start_inp=inp; isdigit(*inp); str++, inp++)
 		;
@@ -85,9 +87,11 @@ char *int_till_txt(char *str, int *res)
 
 void stringify(char *dst, char **src)
 {
-	for (; *src!= NULL; src+=1) {
-		strcpy(dst, *src);
+	for (; NOTNULL(src); src+=1) {
+		astrcpy(dst, *src, strlen(*src), 1);
 		dst += strlen(*src);
-		strcpy(dst++, " ");
+
+		if (NOTNULL(src+1))
+			astrcpy(dst++, " ", 1, 1);
 	}
 }
