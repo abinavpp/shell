@@ -41,7 +41,6 @@ typedef struct jobs {
 	}while(0);										
 
 
-extern int getjid();
 extern void printjobs();
 
 extern jobs **getjob(pid_t pid, int jid);

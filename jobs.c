@@ -17,7 +17,7 @@ static jobs *j_head;
  * sync mechansim like SIGBLOCK, semaphore etc(whichever apt)
  */
 
-int getjid()
+static int getjid()
 {
 	jobs *walk;
 
@@ -144,15 +144,16 @@ void wait_fg(jobs **job)
 	int status, i;
 
 	/* thy shall NOT pass */
+	
 	for (i=0; NOTNULL(job); i++) {
-
-		tcsetpgrp(TERMFD, (*job)->pid[0]);
+		if (tcsetpgrp(TERMFD, (*job)->pid[0]) < 0)
+			perror("tcsetpgrp");
 		while (waitpid((*job)->pid[i], &status, WUNTRACED) == 0)
 			;
 
-		tcsetpgrp(TERMFD, getpid());
-
 		if (WIFEXITED(status)) {
+			if (tcsetpgrp(TERMFD, getpid()) < 0)
+				perror("tcsetpgrp");
 			if ((*job)->pid[i+1] == 0) {
 				deljob((*job)->pid[0]);
 				break;
@@ -160,6 +161,8 @@ void wait_fg(jobs **job)
 		}
 
 		else if (WIFSIGNALED(status)) {
+			if (tcsetpgrp(TERMFD, getpid()) < 0)
+				perror("tcsetpgrp");
 			printf("[%d] (%d) killed by signal %d\n", (*job)->jid, (*job)->pid[0],
 					WTERMSIG(status));
 			deljob((*job)->pid[0]);
@@ -167,6 +170,8 @@ void wait_fg(jobs **job)
 		}
 
 		else if (WIFSTOPPED(status)) {
+			if (tcsetpgrp(TERMFD, getpid()) < 0)
+				perror("tcsetpgrp");
 			printf("[%d] (%d) stopped by signal %d\n", (*job)->jid, 
 					(*job)->pid[0], WSTOPSIG(status));
 			(*job)->state = ST;
