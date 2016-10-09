@@ -46,6 +46,16 @@ void astrcpy(char *dst, const char *src, int len, char null_flag)
 	}
 }
 
+char *astrchr(char *str, int c, int esc_flag)
+{
+	str = strchr(str, c);
+	if (esc_flag) {
+		while (str && *(str-1) == '\\')
+			str = strchr(++str, c);
+	}
+	return str;
+}
+
 void shift_str(char *str, int n)
 {
 	char temp_str[strlen(str)]; /* stores orig str */
