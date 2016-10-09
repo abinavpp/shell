@@ -26,6 +26,7 @@ install : all
 	@echo installed in $(INSTALLDIR)
 
 $(OBJDIR)%.o		:	%.c $(HDR)
+	@[[ -d $(OBJDIR) ]] || mkdir $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 shell	:	$(OBJ)
@@ -34,5 +35,5 @@ shell	:	$(OBJ)
 clean 	:
 	@echo -n "Removing [" && ls $(OBJDIR) | xargs echo -n && echo "]"
 	@read -p "Really ? " inp; \
-	[ $$inp = "y" ] && rm $(OBJDIR)* || echo "Exiting..."
+	[[ $$inp = "y" ]] && rm $(OBJDIR)* || echo "Exiting..."
 	
