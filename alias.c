@@ -5,8 +5,19 @@
 #include "alias.h"
 #include "util.h"
 
+/* main alias hash table entries */
 static alias *al_ent[HASH_MAX];
 
+/* 
+ * the following al_lin... functions are operations on
+ * a minimal linear data structure used by the parser only
+ * for blacklisting. al_trans is not used since we are blacklisting
+ * alias names and not its trans al_head is presumebly defined outside
+ * alias.c and must be tracked there unlike the main alias hash table
+ * that is all maintained in here.
+ */
+
+/* searches al_lin from al_head in search of al_name entry */
 alias *al_lin_src(alias *al_head, char *al_name)
 {
 	alias *walk;
@@ -16,18 +27,22 @@ alias *al_lin_src(alias *al_head, char *al_name)
 	return walk;
 }
 
+/* deallocates the whole al_lin data structure and makes
+ * (*al_head) point to NULL */
 void al_lin_free(alias **al_head)
 {
-	alias **walk, **next;
+	alias **walk, **next = NULL;
 
-	for (walk=al_head; NOTNULL(walk); walk=next) {
-		next = &((*walk)->next);
+	for (walk=al_head; NOTNULL(walk); ) {
+		if ((*walk)->next)
+			next = &((*walk)->next);
 		free((*walk)->name);
 		free(*walk);
 		*walk = NULL;
 	}
 }
 
+/* inserts into al_lin data structure pointed by *al_head */
 void al_lin_ins(alias **al_head, char *al_name)
 {
 	alias **walk;
@@ -44,12 +59,12 @@ void al_lin_ins(alias **al_head, char *al_name)
 	(*walk)->next = NULL;
 }
 
-alias *is_alias(char *al_name)
-{
-	return *(al_src(al_name));
-}
-
-alias **al_src(char *al_name)
+/*
+ * searches for al_name in the alias hash table and
+ * returns a reference to the pointer itself so that insertion
+ * and deletion can be done better
+ */
+static alias **al_src(char *al_name)
 {
 	alias **walk;
 
@@ -59,7 +74,20 @@ alias **al_src(char *al_name)
 	return walk;
 }
 
-void al_ins(char *al_name, char *al_trans)
+
+/* best for use outside alias.c */
+alias *is_alias(char *al_name)
+{
+	return *(al_src(al_name));
+}
+
+/* 
+ * inserts alias with al_name and al_trans into the alias
+ * hash table, if overwriting, al_trans is realloced else
+ * the entries are freshly malloced, this call should succeed
+ * all the time
+ */
+static void al_ins(char *al_name, char *al_trans)
 {
 	alias **al_at;
 
@@ -93,6 +121,45 @@ void al_ins(char *al_name, char *al_trans)
 	}
 }
 
+/* removes alias from alias hash table, returns 1 if found & 
+ * removed OR 0 if not found */
+static int al_del(char *al_name)
+{
+	alias **al_tgt;
+	alias *free_tgt;
+
+	al_tgt = al_src(al_name);
+
+	if (*al_tgt) {
+		free((*al_tgt)->name);
+		free((*al_tgt)->trans);
+		free_tgt = *al_tgt;
+		*al_tgt = (*al_tgt)->next;
+		free(free_tgt);
+		return 1;
+	}
+	return 0;
+}
+
+void al_free()
+{
+	int i;
+	alias *free_tgt;
+
+	for(i=0; i<HASH_MAX; i++) {
+		while (al_ent[i]) {
+			free(al_ent[i]->name);
+			free(al_ent[i]->trans);
+			free_tgt = al_ent[i];
+			al_ent[i] = al_ent[i]->next;
+			free(free_tgt);
+		}
+	}
+}
+
+/* Following functions are the ones called by shell builtins */
+
+/* called by shell builtin alias */
 void alias_me(char **cmd)
 {
 	char *al_name, *al_trans;
@@ -101,7 +168,7 @@ void alias_me(char **cmd)
 	if (!NOTNULL(cmd[1]))
 		return;
 
-	if (!strchr(cmd[1], '=')) {
+	if (!astrchr(cmd[1], '=', 1)) {
 		if ((al_cur=is_alias(cmd[1])))
 			printf("%s is aliased with %s\n", cmd[1], al_cur->trans);
 		else
@@ -121,6 +188,20 @@ void alias_me(char **cmd)
 	/* trailing spaces will be taken care by the parser */
 	al_trans = cmd[1]; 
 
-	al_ins(al_name, al_trans); /* alias is hashed in */
-	printf("aliasing %s with %s\n", al_name, al_trans);
- }
+	if (al_name && *al_name) {
+		al_ins(al_name, al_trans); /* alias is hashed in */
+		printf("aliasing %s with %s\n", al_name, al_trans);
+	}
+}
+
+/* called by shell builtin unalias */
+void unalias_me(char **cmd)
+{
+	if (!NOTNULL(cmd[1]))
+		return;
+
+	if (al_del(cmd[1]))
+		printf("%s unaliased\n", cmd[1]);
+	else
+		printf("%s not aliased\n", cmd[1]);
+}
