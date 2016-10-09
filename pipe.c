@@ -1,4 +1,3 @@
-#include <sys/ioctl.h>
 #include <signal.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -14,32 +13,20 @@
 #include "util.h"
 #include "jobs.h"
 
+/* special characters */
 #define ESCAPE(c)		((c) == '\\')
 #define CHILD_DELIM(c)	((c) == ' ')
 #define PARENT_DELIM(c)	((c)=='|' || (c)==';' || (c)=='&')
 #define GRAND_DELIM(c)	((c)=='\n')
 #define QUOTE(c)		((c)=='\'' || (c)=='\"')
 
-#define DO_REDIR	1	/* redirection */
-#define DO_PP		2	/* post_process cmdline */
-#define DO_UBLK		4	/* signal unblock */
-#define DO_SETPG	8	/* set process group */
-#define DO_SETTERM  16	/* set terminal for process */
-#define DO_ALL		(DO_REDIR|DO_PP|DO_UBLK|DO_SETPG|DO_SETTERM)
-
-static void prompt();
-static void tokenize(char **inp, char *delim);
-static void aliasize(char *start_arg, char *delim, char **inp);
-static char parse_cmd(char **inp, char **cmd, int start_ind);
-static void do_redir(char **cmd);
-static void redir_me(int redir_fd, char *redir_dst, int ap_flag);
-static int builtin(char **cmd);
-static void exec_me(char **cmd, int state);
-static void pipe_me(char **cmd, char **inp, char *delim);
-static void eval(char *inp);
-static int is_quoted(char *str);
-static void postproc_cmdline(char **cmd);
-static void preproc_cmdline(char *inp);
+/* fork and exec flags */
+#define FE_REDIR	1	/* redirection */
+#define FE_PP		2	/* post_process cmdline */
+#define FE_UBLK		4	/* signal unblock */
+#define FE_SETPG	8	/* set process group */
+#define FE_SETTERM  16	/* set terminal for process */
+#define FE_ALL		(FE_REDIR|FE_PP|FE_UBLK|FE_SETPG|FE_SETTERM)
 
 /* head of the singly linked list of alias blacklist to avoid nasty
  * recurisive alias cases, like alias "ls=ls;ls" */
@@ -60,8 +47,8 @@ static void tokenize(char **inp, char *delim)
 {
 
 	for (; ; (*inp)++) {
-		if (QUOTE(**inp)) {
-			*inp = strchr(*inp+1, **inp);
+		if (QUOTE(**inp) && !ESCAPE(*(*inp-1))) {
+			*inp = astrchr(*inp+1, **inp, 1);
 		}
 
 		if (CHILD_DELIM(**inp) || PARENT_DELIM(**inp) || GRAND_DELIM(**inp)) {
@@ -90,7 +77,7 @@ static void aliasize(char *start_arg, char *delim, char **inp)
 			/* this is not a blacklisted one, hence alias it */
 			al_lin_ins(&al_blist, start_arg); /* but from now till deadend it is */
 			len = strlen(start_arg);
-			strncpy(al_arg, start_arg, len);
+			astrcpy(al_arg, start_arg, len, 1);
 			**inp = *delim; /* so that repl_str works till actual '\0' of cmdline */
 			repl_str(al_arg, al_cur->trans, start_arg);
 
@@ -116,7 +103,12 @@ static void aliasize(char *start_arg, char *delim, char **inp)
 	}
 }
 
-/* the god-forsaken parser!!! */
+/*
+ * the god-forsaken parser!!!
+ * inp references the main input string and this function populates
+ * cmd from start_ind. Quoted args of inp will have their leading quote
+ * in cmd as an FYI for post_proc
+ */
 static char parse_cmd(char **inp, char **cmd, int start_ind)
 {
 	int i; /* main index for cmd array for exec */
@@ -138,7 +130,7 @@ static char parse_cmd(char **inp, char **cmd, int start_ind)
 			/* keeping the leading quote in cmd[i] for post_proc as 
 			 * a signal to ignore special characters */
 			cmd[i++] = (*inp);
-			*inp = strchr((*inp)+1, delim);
+			*inp = astrchr((*inp)+1, delim, 1);
 			**inp = '\0'; /* cmd[i] points till here */
 			start_arg = *inp + 1; /* points to the next arg */
 		}
@@ -176,130 +168,7 @@ static char parse_cmd(char **inp, char **cmd, int start_ind)
 		}
 	}
 	cmd[i] = NULL; /* to make argvp happy */
-	/* printf("|%s|%s|%s|%s\n", cmd[0], cmd[1], cmd[2], cmd[3]); */
 	return delim; /* for verifying if this to be piped or bg'd etc */
-}
-
-/* return type of redir and sets ap_flag (append flag) */
-static void do_redir(char **cmd)
-{
-	int redir_fd, ap_flag, null_flag;
-	char *redir_tok, *redir_dst;
-
-	null_flag = 1;
-	while (cmd && *cmd) {
-		redir_tok = int_till_txt(*cmd, &redir_fd);
-		if (redir_fd >= 1) {
-			if (*redir_tok == '>') {
-				/* redir_dst can be filename or can be 
-				 * NULL(which will fail at redir_me) */
-				redir_dst = *(cmd+1);
-				ap_flag = (*(redir_tok+1) == '>') ? 1 : 0;
-				/* append flag and dst set */
-				redir_me(redir_fd, redir_dst, ap_flag);
-				if (null_flag) {
-					*cmd = NULL;
-					null_flag = 0;
-				}
-			}
-		}
-		cmd = cmd+1; /* next arg */
-	}
-}
-
-/* sets up fd to do the redir */
-static void redir_me(int redir_fd, char *redir_dst, int ap_flag)
-{
-	int dst_fd;
-
-	if (!redir_dst) {
-		ERRMSG("Error redirecting\n");
-		return;
-	}
-
-	if (!ap_flag) {/* don't append the output */
-		if ((dst_fd=creat(redir_dst, 0644)) < 0) {
-			ERR("creat");
-			return;
-		}
-	}
-
-	else {/* append the output */
-		if ((dst_fd=open(redir_dst, O_RDWR | O_APPEND)) < 0) {
-			ERR("open");
-			return;
-		}
-	}
-
-	/* now exec can be done */
-	if (dup2(dst_fd, redir_fd) < 0) { 
-		ERR_EXIT("dup2");
-	}
-
-	clean_up("f", dst_fd);
-}
-
-/* does shell builtins, hopefully */
-static int builtin(char **cmd)
-{
-	int err;
-
-	if (cmd[0]) {
-		switch (*cmd[0]) {
-		case 'a' :
-			if (!strcmp(cmd[0], "alias")) {
-				postproc_cmdline(cmd);
-				alias_me(cmd);
-				globfree(&glob_res);
-				return 1;
-			}
-			break;
-		case 'b' :
-			if (!strcmp(cmd[0], "bg")) {
-				do_bgfg(cmd, BG);
-				return 1;
-			}
-			break;
-		case 'c' :
-			if (!strcmp(cmd[0], "cd")) {
-				if (cmd[1]==NULL) {
-					chdir(getenv("HOME"));
-					return 1;
-				}
-
-				postproc_cmdline(cmd);
-
-				if (chdir(cmd[1])<0 )
-					ERR("chdir");
-
-				globfree(&glob_res);
-				return 1;
-			}
-		case 'f' :
-			if (!strcmp(cmd[0], "fg")) {
-				do_bgfg(cmd, FG);
-				return 1;
-			}
-			break;
-		case 'j' :
-			if (!strcmp(cmd[0], "jobs")) {
-				printjobs();
-				return 1;
-			}
-			break;
-		case 'v' :
-			if (!strcmp(cmd[0], "var")) {
-				return 1;
-			}
-			break;
-		case 'e' :
-			if (!strcmp(cmd[0], "exit")) {
-				fprintf(stdout, "Exiting\n");
-				exit(EXIT_SUCCESS);
-			}
-		}
-	}
-	return 0;
 }
 
 /* unqoutes quoted arg, removes backslash of escapes, globs wildcards */
@@ -340,8 +209,148 @@ static void postproc_cmdline(char **cmd)
 	}
 }
 
+static void shell_init()
+{
+	setbuf(stdout, NULL);
+	dup2(1, TERMFD);
+	signal_init();
+}
+
+static void shell_cleanup()
+{
+	al_free();
+	clean_up("f", TERMFD);
+}
+
+/* sets up fd to do the redir */
+static void redir_me(int redir_fd, char *redir_dst, int ap_flag)
+{
+	int dst_fd;
+
+	if (!redir_dst) {
+		ERRMSG("Error redirecting\n");
+		return;
+	}
+
+	if (!ap_flag) {/* don't append the output */
+		if ((dst_fd=creat(redir_dst, 0644)) < 0) {
+			ERR("creat");
+			return;
+		}
+	}
+
+	else {/* append the output */
+		if ((dst_fd=open(redir_dst, O_RDWR | O_APPEND)) < 0) {
+			ERR("open");
+			return;
+		}
+	}
+
+	/* now exec can be done */
+	if (dup2(dst_fd, redir_fd) < 0) { 
+		ERR_EXIT("dup2");
+	}
+
+	clean_up("f", dst_fd);
+}
+
+/* return type of redir and sets ap_flag (append flag) */
+static void do_redir(char **cmd)
+{
+	int redir_fd, ap_flag, null_flag;
+	char *redir_tok, *redir_dst;
+
+	null_flag = 1;
+	while (cmd && *cmd) {
+		redir_tok = int_till_txt(*cmd, &redir_fd);
+		if (redir_fd >= 1) {
+			if (*redir_tok == '>') {
+				/* redir_dst can be filename or can be 
+				 * NULL(which will fail at redir_me) */
+				redir_dst = *(cmd+1);
+				ap_flag = (*(redir_tok+1) == '>') ? 1 : 0;
+				/* append flag and dst set */
+				redir_me(redir_fd, redir_dst, ap_flag);
+				if (null_flag) {
+					*cmd = NULL;
+					null_flag = 0;
+				}
+			}
+		}
+		cmd = cmd+1; /* next arg */
+	}
+}
+
+/* does shell builtins, hopefully */
+static int builtin(char **cmd)
+{
+	int err;
+
+	if (cmd[0]) {
+		switch (*cmd[0]) {
+		case 'a' :
+			if (!strcmp(cmd[0], "alias")) {
+				postproc_cmdline(cmd);
+				alias_me(cmd);
+				globfree(&glob_res);
+				return 1;
+			}
+			break;
+		case 'b' :
+			if (!strcmp(cmd[0], "bg")) {
+				do_bgfg(cmd, BG);
+				return 1;
+			}
+			break;
+		case 'c' :
+			if (!strcmp(cmd[0], "cd")) {
+				if (cmd[1]==NULL) {
+					chdir(getenv("HOME"));
+					return 1;
+				}
+				postproc_cmdline(cmd);
+				if (chdir(cmd[1])<0 )
+					ERR("chdir");
+				globfree(&glob_res);
+				return 1;
+			}
+		case 'e' :
+			if (!strcmp(cmd[0], "exit")) {
+				shell_cleanup();
+				fprintf(stdout, "Exiting\n");
+				exit(EXIT_SUCCESS);
+			}
+		case 'f' :
+			if (!strcmp(cmd[0], "fg")) {
+				do_bgfg(cmd, FG);
+				return 1;
+			}
+			break;
+		case 'j' :
+			if (!strcmp(cmd[0], "jobs")) {
+				printjobs();
+				return 1;
+			}
+			break;
+		case 'u' :
+			if (!strcmp(cmd[0], "unalias")) {
+				postproc_cmdline(cmd);
+				unalias_me(cmd);
+				globfree(&glob_res);
+				return 1;
+			}
+		case 'v' :
+			if (!strcmp(cmd[0], "var")) {
+				return 1;
+			}
+			break;
+		}
+	}
+	return 0;
+}
+
 /* the function name explains for itself
- * facilitates pgrp and signal unblock */
+ * facilitates pgrp, tc, signal unblock */
 static pid_t fork_and_exec(char **cmd, int flags,
 		pid_t pgid, sigset_t msk)
 {
@@ -357,19 +366,21 @@ static pid_t fork_and_exec(char **cmd, int flags,
 		SIG_TGL(SIGTTOU, SIG_DFL);
 		SIG_TGL(SIGTTIN, SIG_DFL);
 		pid = getpid();
-		if (flags & DO_REDIR)
+		if (flags & FE_REDIR)
 			do_redir(cmd);
 
-		if (flags & DO_PP)
+		if (flags & FE_PP)
 			postproc_cmdline(cmd);
 
-		if (flags & DO_UBLK)
+		if (flags & FE_UBLK)
 			MASK_ALLSIG(SIG_UNBLOCK, msk);
 
-		if (flags & DO_SETPG) {
-			 setpgid(0, pgid);
+		if (flags & FE_SETPG) {
+			 if (setpgid(0, pgid) < 0)
+				 perror("setpgid");
 		}
-		if (flags & DO_SETTERM) {
+
+		if (flags & FE_SETTERM) {
 			if (!pgid) {
 				while (tcgetpgrp(TERMFD) != pid)
 					; /* tcpgrp will be pid itseld then */
@@ -379,10 +390,25 @@ static pid_t fork_and_exec(char **cmd, int flags,
 					; /* tcpgrp as per arg in function */
 			}
 		}
+		clean_up("f", TERMFD);
 		execvp(cmd[0], cmd);
 		ERR_EXIT("execvp");
 		break;
 	default :
+		/* 
+		 * force setpgid here, sometimes the parent, ie the shell, 
+		 * goes in a hurry and the child won't have a chance to setpgid
+		 * and that would create havoc especially in pipelines 
+		 * */
+		if (flags & FE_SETPG) {
+			 if (setpgid(pid, pgid ? 
+						 pgid : pid) < 0)
+				 perror("setpgid");
+		}
+		/* so that child don't spin too much with tcsetpgrp */
+		if (flags & FE_SETTERM) {
+			tcsetpgrp(TERMFD, pgid ? pgid : pid);
+		}
 		break;
 	}
 	return pid;
@@ -405,14 +431,14 @@ static void exec_me(char **cmd, int state)
 	MASK_SIG(SIG_BLOCK, SIGCHLD, msk);
 
 	pid = fork_and_exec(cmd, (state == FG) ? 
-			DO_ALL : (DO_ALL^DO_SETTERM), 0, msk);
+			FE_ALL : (FE_ALL^FE_SETTERM), 0, msk);
 	job = addjob(pid, state, cmd);
 
 	if(state == FG) {
 		wait_fg(job);
 	}
 	else {
-		printf("[%d] %d\t%s\n",(*job)->jid, (*job)->pid, (*job)->cmdline);
+		printf("[%d] %d\t%s\n",(*job)->jid, (*job)->pid[0], (*job)->cmdline);
 	}
 
 	MASK_SIG(SIG_UNBLOCK, SIGCHLD, msk);
@@ -445,11 +471,11 @@ static void pipe_me(char **cmd, char **inp, char *delim)
 		clean_up("f", pipe_fd[1]);
 
 		if (!pgid) {
-			pgid = fork_and_exec(cmd, DO_ALL, 0, msk);
+			pgid = fork_and_exec(cmd, FE_ALL, 0, msk);
 			job = addjob(pgid, FG, cmd); /* so (*job)->pid[0] = pgid */
 		}
 		else {
-			(*job)->pid[++i] = fork_and_exec(cmd, DO_ALL^DO_SETTERM, pgid, msk);
+			(*job)->pid[++i] = fork_and_exec(cmd, FE_ALL^FE_SETTERM, pgid, msk);
 			strcat((*job)->cmdline, " | ");
 			stringify(pipe_cmds, cmd);
 			strcat((*job)->cmdline, pipe_cmds);
@@ -465,7 +491,7 @@ static void pipe_me(char **cmd, char **inp, char *delim)
 	if (dup2(stdout_fd, STDOUT_FILENO) < 0) {
 		ERR_EXIT("dup2");
 	}
-	(*job)->pid[++i] = fork_and_exec(cmd, DO_ALL^DO_SETTERM, pgid, msk);
+	(*job)->pid[++i] = fork_and_exec(cmd, FE_ALL^FE_SETTERM, pgid, msk);
 	strcat((*job)->cmdline, " | ");
 	stringify(pipe_cmds, cmd);
 	strcat((*job)->cmdline, pipe_cmds);
@@ -499,34 +525,36 @@ static void eval(char *inp)
 	al_lin_free(&al_blist);
 }
 
-/* checks if PS2 is required */
+/* for checking if PS2 is required */
 static int is_quoted(char *str)
 {
 	while (*str != '\0') {
 		while (*str!='\0' && !QUOTE(*str))
 			str++;
 		if (str) {
-			if ((str=strchr(str+1, *str)) == NULL)
+			if (ESCAPE(*(str-1)))
+				str++;
+			else if ((str=astrchr(str+1, *str, 1)) == NULL)
 				return 0;
-			else
+			else 
 				str++;
 		}
 	}
 	return 1;
 }
 
-/* ~ becomes $HOME */
+/* ~ becomes $HOME not quoted ~ or \~ */
 static void tilde_exp(char *inp)
 {
 	char home[PATH_MAX] = {0};
 	int home_l;
 
-	strncpy(home, getenv("HOME"), strlen(getenv("HOME")));
+	astrcpy(home, getenv("HOME"), strlen(getenv("HOME")), 1);
 	home_l = strlen(home);
 
-	for (; *inp!='\0'; inp++) {
-		if (QUOTE(*inp)) {
-			inp = strchr(inp+1, *inp);
+	for (; NOTNULL(inp); inp++) {
+		if (QUOTE(*inp) && !ESCAPE(*(inp-1))) {
+			inp = astrchr(inp+1, *inp, 1);
 			continue;
 		}
 		if (*inp == '~' && !ESCAPE(*(inp-1))) {
@@ -550,20 +578,20 @@ static void preproc_cmdline(char *inp)
 
 static void prompt()
 {
-	char cmd[LINE_MAX] = {0}; /* main command line */
+	char cmdline[LINE_MAX] = {0}; /* main command line */
 	char *inp; /* points to where input is done on main command line */
 
-	inp = cmd;
+	inp = cmdline;
 
 	while (1) {
 		printf("%s", ps1);
 		fgets(inp, LINE_MAX, stdin);
-		while (!is_quoted(cmd)) {
+		while (!is_quoted(cmdline)) {
 			inp = strchr(inp, '\n');
 			printf("%s", ps2);
 			fgets(inp, LINE_MAX, stdin);
 		}
-		inp = cmd;
+		inp = cmdline;
 		preproc_cmdline(inp);
 		eval(inp);
 		memset(inp, 0, LINE_MAX);
@@ -573,9 +601,8 @@ static void prompt()
 
 void main()
 {
-	setbuf(stdout, NULL);
-	dup2(1, TERMFD);
-	signal_init();
+	shell_init();
 	prompt();
+	shell_cleanup();
 	exit(EXIT_FAILURE);
 }
