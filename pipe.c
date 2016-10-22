@@ -9,16 +9,18 @@
 #include <poll.h>
 #include <glob.h>
 
+#include "mark.h"
 #include "alias.h"
 #include "util.h"
 #include "jobs.h"
 
-/* special characters */
+/* parser specific macros */
 #define ESCAPE(c)		((c) == '\\')
 #define CHILD_DELIM(c)	((c) == ' ')
 #define PARENT_DELIM(c)	((c)=='|' || (c)==';' || (c)=='&')
 #define GRAND_DELIM(c)	((c)=='\n')
 #define QUOTE(c)		((c)=='\'' || (c)=='\"')
+#define REDIRTOFD_DELIM(inp) (*(inp)=='&' && *((inp)-1)=='>')
 
 /* fork and exec flags */
 #define FE_REDIR	1	/* redirection */
@@ -111,11 +113,9 @@ static void aliasize(char *start_arg, char *delim, char **inp)
  */
 static char parse_cmd(char **inp, char **cmd, int start_ind)
 {
-	int i; /* main index for cmd array for exec */
+	int i = start_ind; /* main index for cmd array for exec */
 	char delim; /* deals with delimiter for args/cmds of inp */
 	char *start_arg; /* keeps track of args/tokens of inp */
-
-	i = start_ind;
 
 	if (!inp || !(*inp) || !(**inp)) /* NULL string */
 		return 0;
@@ -140,6 +140,9 @@ static char parse_cmd(char **inp, char **cmd, int start_ind)
 			continue;
 		}
 		if (CHILD_DELIM(**inp) || PARENT_DELIM(**inp) || GRAND_DELIM(**inp)) {
+
+			if (REDIRTOFD_DELIM(*inp))
+				continue;
 			/* now this might be one cmd or an arg of a cmd */
 			delim = **inp;
 			**inp = '\0'; /* now cmd[i] can point till here */
@@ -219,6 +222,7 @@ static void shell_init()
 static void shell_cleanup()
 {
 	al_free();
+	mark_free();
 	clean_up("f", TERMFD);
 }
 
@@ -257,28 +261,47 @@ static void redir_me(int redir_fd, char *redir_dst, int ap_flag)
 /* return type of redir and sets ap_flag (append flag) */
 static void do_redir(char **cmd)
 {
-	int redir_fd, ap_flag, null_flag;
+	int redir_fd, redir_tofd, ap_flag, null_flag = 1;
 	char *redir_tok, *redir_dst;
 
-	null_flag = 1;
-	while (cmd && *cmd) {
+	while (NOTNULL(cmd)) {
 		redir_tok = int_till_txt(*cmd, &redir_fd);
 		if (redir_fd >= 1) {
 			if (*redir_tok == '>') {
+
+				if (*(redir_tok+1) == '&') {
+					int_till_txt(redir_tok+2, &redir_tofd);
+					if (redir_tofd && dup2(redir_tofd, redir_fd) < 0)
+						ERRMSG("Error redirecting\n");
+				}
+				else {
 				/* redir_dst can be filename or can be 
 				 * NULL(which will fail at redir_me) */
-				redir_dst = *(cmd+1);
-				ap_flag = (*(redir_tok+1) == '>') ? 1 : 0;
-				/* append flag and dst set */
-				redir_me(redir_fd, redir_dst, ap_flag);
+					redir_dst = *(cmd+1);
+					ap_flag = (*(redir_tok+1) == '>') ? 1 : 0;
+					/* append flag and dst set */
+					redir_me(redir_fd, redir_dst, ap_flag);
+				}
 				if (null_flag) {
-					*cmd = NULL;
-					null_flag = 0;
+						*cmd = NULL;
+						null_flag = 0;
 				}
 			}
 		}
 		cmd = cmd+1; /* next arg */
 	}
+}
+
+static void do_cd(char **cmd)
+{
+	if (!cmd[1]) {
+		chdir(getenv("HOME"));
+		return;
+	}
+	postproc_cmdline(cmd);
+	if (chdir(cmd[1]) < 0)
+		ERR("chdir");
+	globfree(&glob_res);
 }
 
 /* does shell builtins, hopefully */
@@ -296,42 +319,56 @@ static int builtin(char **cmd)
 				return 1;
 			}
 			break;
+
 		case 'b' :
 			if (!strcmp(cmd[0], "bg")) {
 				do_bgfg(cmd, BG);
 				return 1;
 			}
 			break;
+
 		case 'c' :
 			if (!strcmp(cmd[0], "cd")) {
-				if (cmd[1]==NULL) {
-					chdir(getenv("HOME"));
-					return 1;
-				}
-				postproc_cmdline(cmd);
-				if (chdir(cmd[1])<0 )
-					ERR("chdir");
-				globfree(&glob_res);
+				do_cd(cmd);
 				return 1;
 			}
+			break;
+
+		case 'g' :
+			if (!strcmp(cmd[0], "gt")) {
+				goto_mark(cmd);
+				return 1;
+			}
+			break;
+
+		case 'm' :
+			if (!strcmp(cmd[0], "mk")) {
+				mark_me(cmd);
+				return 1;
+			}
+			break;
+
 		case 'e' :
 			if (!strcmp(cmd[0], "exit")) {
 				shell_cleanup();
 				fprintf(stdout, "Exiting\n");
 				exit(EXIT_SUCCESS);
 			}
+
 		case 'f' :
 			if (!strcmp(cmd[0], "fg")) {
 				do_bgfg(cmd, FG);
 				return 1;
 			}
 			break;
+
 		case 'j' :
 			if (!strcmp(cmd[0], "jobs")) {
 				printjobs();
 				return 1;
 			}
 			break;
+
 		case 'u' :
 			if (!strcmp(cmd[0], "unalias")) {
 				postproc_cmdline(cmd);
@@ -339,11 +376,18 @@ static int builtin(char **cmd)
 				globfree(&glob_res);
 				return 1;
 			}
+			if (!strcmp(cmd[0], "unmk")) {
+				unmark_me(cmd);
+				return 1;
+			}
+			break;
+
 		case 'v' :
 			if (!strcmp(cmd[0], "var")) {
 				return 1;
 			}
 			break;
+
 		}
 	}
 	return 0;
@@ -366,6 +410,17 @@ static pid_t fork_and_exec(char **cmd, int flags,
 		SIG_TGL(SIGTTOU, SIG_DFL);
 		SIG_TGL(SIGTTIN, SIG_DFL);
 		pid = getpid();
+
+		if (flags & FE_SETTERM) {
+			if (!pgid) {
+				while (tcgetpgrp(TERMFD) != pid)
+					; /* tcpgrp will be pid itseld then */
+			}
+			else {
+				while (tcgetpgrp(TERMFD) != pgid)
+					; /* tcpgrp as per arg in function */
+			}
+		}
 		if (flags & FE_REDIR)
 			do_redir(cmd);
 
@@ -380,16 +435,6 @@ static pid_t fork_and_exec(char **cmd, int flags,
 				 perror("setpgid");
 		}
 
-		if (flags & FE_SETTERM) {
-			if (!pgid) {
-				while (tcgetpgrp(TERMFD) != pid)
-					; /* tcpgrp will be pid itseld then */
-			}
-			else {
-				while (tcgetpgrp(TERMFD) != pgid)
-					; /* tcpgrp as per arg in function */
-			}
-		}
 		clean_up("f", TERMFD);
 		execvp(cmd[0], cmd);
 		ERR_EXIT("execvp");
