@@ -31,32 +31,40 @@ alias *al_lin_src(alias *al_head, char *al_name)
  * (*al_head) point to NULL */
 void al_lin_free(alias **al_head)
 {
-	alias **walk, **next = NULL;
+	alias *walk, *target;
 
-	for (walk=al_head; NOTNULL(walk); ) {
-		if ((*walk)->next)
-			next = &((*walk)->next);
-		free((*walk)->name);
-		free(*walk);
-		*walk = NULL;
+	if (!NOTNULL(al_head))
+		return;
+
+	for (walk=*al_head;;) {
+		target = walk;
+		if (walk->next)
+			walk = walk->next;
+		else {
+			free(target->name);
+			free(target);
+			break;
+		}
+		free(target->name);
+		free(target);
 	}
+	*al_head = NULL;
 }
 
 /* inserts into al_lin data structure pointed by *al_head */
 void al_lin_ins(alias **al_head, char *al_name)
 {
-	alias **walk;
+	alias *old_head;
 
-	for (walk=al_head; NOTNULL(walk); )
-		walk=&((*walk)->next);
+	old_head = *al_head;
 
-	if ((*walk = (alias *)malloc(sizeof(alias))) == NULL)
+	if ((*al_head = (alias *)malloc(sizeof(alias))) == NULL)
 		ERR_EXIT("malloc");
-	if (( (*walk)->name = (char *)malloc(strlen(al_name)+1) )
+	if (( (*al_head)->name = (char *)malloc(strlen(al_name)+1) )
 			== NULL)
 		ERR_EXIT("malloc");
-	astrcpy((*walk)->name, al_name, strlen(al_name), 1);
-	(*walk)->next = NULL;
+	astrcpy((*al_head)->name, al_name, strlen(al_name), 1);
+	(*al_head)->next = old_head;
 }
 
 /*
