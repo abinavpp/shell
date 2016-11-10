@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +9,8 @@
 
 #include "util.h"
 #include "jobs.h"
+
+extern int subshell_flag;
 
 static jobs *j_head;
 
@@ -22,31 +25,19 @@ static int getjid()
 	jobs *walk;
 
 	if (!j_head) /* empty job list */
-		return 1;
+		return START_JOBID;
 
 	for (walk=j_head; walk->next; walk=walk->next)
 		; /* last job */
 	return (walk->jid + 1);
 }
 
-/* what >job runs */
-void printjobs()
-{
-	jobs *walk;
-
-	for (walk=j_head; walk; walk=walk->next) {
-		printf("[%d] %d %s\t %s\n", walk->jid, walk->pid[0],
-				walk->state==ST ? "stopped":"running", 
-				walk->cmdline);
-	}
-}
-
-/* 
+/*
  * get job by pid or jid, not by both
  * pid = 0, search by jid
  * pid = -1 || jid = -1, for ins at tail
  */
-jobs **getjob(pid_t pid, int jid)
+static jobs **getjob(pid_t pid, int jid)
 {
 	jobs **walk;
 
@@ -65,8 +56,42 @@ jobs **getjob(pid_t pid, int jid)
 	return NULL;
 }
 
+/* return pointer to current foreground job */
+static jobs **get_fgjob()
+{
+	jobs **walk;
+
+	for (walk=&j_head; *walk && (*walk)->state!= FG;
+			walk=&((*walk)->next))
+		;
+	return walk;
+}
+
+/* returns pointer to last job */
+static jobs **get_lastjob()
+{
+	jobs **walk;
+
+	for (walk=&j_head; *walk && (*walk)->next;
+			walk=&((*walk)->next))
+		;
+	return walk;
+}
+
+/* what >job runs */
+void printjobs()
+{
+	jobs *walk;
+
+	for (walk=j_head; walk; walk=walk->next) {
+		printf("[%d] %d %s\t %s\n", walk->jid, walk->pid[0],
+				walk->state==ST ? "stopped":"running",
+				walk->cmdline);
+	}
+}
+
 /*
- * ins job in joblist 
+ * ins job in joblist
  * pid[0] is actually the pgid for job, ie pid in the fn arg
  * pid[i]=0 is end of pidlist for job
  */
@@ -75,6 +100,7 @@ jobs **addjob(pid_t pid, int state, char **cmd)
 	int jid;
 	jobs **job;
 	char cmdline[LINE_MAX];
+	char *eocmd;
 
 	jid = getjid();
 	job = getjob(-1, 0);
@@ -87,32 +113,13 @@ jobs **addjob(pid_t pid, int state, char **cmd)
 	(*job)->state = state;
 	/* this is bloody important, NEVER rely on the fact that next will
 	 * point to NULL by default, speaking from experience! >:( */
-	(*job)->next = NULL; 
+	(*job)->next = NULL;
 	astrcpy((*job)->cmdline, cmdline, strlen(cmdline), 1);
+	/* \n appears if subshell, so replacing it with ')' */
+	if (eocmd=chrtochr((*job)->cmdline, '\n', ')'))
+		*(eocmd+1) = '\0';
 
 	return job;
-}
-
-/* return pointer to current foreground job */
-jobs **get_fgjob()
-{
-	jobs **walk;
-
-	for (walk=&j_head; *walk && (*walk)->state!= FG;
-			walk=&((*walk)->next))
-		;
-	return walk;
-}
-
-/* returns pointer to last job */
-jobs **get_lastjob()
-{
-	jobs **walk;
-
-	for (walk=&j_head; *walk && (*walk)->next;
-			walk=&((*walk)->next))
-		;
-	return walk;
 }
 
 /* removes job from the joblist by pid,
@@ -123,36 +130,61 @@ void deljob(pid_t pid)
 
 	job = getjob(pid, 0);
 
-	/* getjob can return (job **)NULL or &(job *)NULL */
-	if (!job || !(*job))
-		return;
+	/* if (!job || !(*job)) */
+		/* return; */
 
-	target = *job;
-	/* order is IMPORTANT, we dont want to free neighbour's next 
-	 * so update neighbour first then kill the target */
-	*job = (*job)->next;
-	free(target);
+	/* getjob can return (job **)NULL or &(job *)NULL */
+	if (NOTNULL(job)) {
+		target = *job;
+		/* order is IMPORTANT, we dont want to free neighbour's next
+		 * so update neighbour first then kill the target */
+		*job = (*job)->next;
+		free(target);
+	}
 }
 
-/* 
- * the basic wait for foreground used by fg cmd and basic 
+/* frees all the job entries from j_head */
+void job_free()
+{
+	jobs *walk, *target;
+
+	for (walk=j_head; walk; walk=walk->next ,free(target)) {
+		target = walk;
+	}
+	j_head = NULL;
+}
+
+/* prints only if not a subshell */
+static void ss_safe_printf(char *fmt, ...)
+{
+	va_list ap;
+
+	if (!subshell_flag) {
+		va_start(ap, fmt);
+		vprintf(fmt, ap);
+	}
+}
+
+/*
+ * the basic wait for foreground used by fg cmd and basic
  * non bg cmd in the shell. Make sure SIGCHLD is blocked
- * to avoid race conditions that make the joblist unreliable 
+ * to avoid race conditions that make the joblist unreliable.
+ * No terminal control or printing if subshell
  * */
 void wait_fg(jobs **job)
 {
 	int status, i;
 
 	/* thy shall NOT pass */
-	
+
 	for (i=0; NOTNULL(job); i++) {
-		if (tcsetpgrp(TERMFD, (*job)->pid[0]) < 0)
+		if (!subshell_flag && tcsetpgrp(TERMFD, (*job)->pid[0]) < 0)
 			perror("tcsetpgrp");
 		while (waitpid((*job)->pid[i], &status, WUNTRACED) == 0)
 			;
 
 		if (WIFEXITED(status)) {
-			if (tcsetpgrp(TERMFD, getpid()) < 0)
+			if (!subshell_flag && tcsetpgrp(TERMFD, getpid()) < 0)
 				perror("tcsetpgrp");
 			if ((*job)->pid[i+1] == 0) {
 				deljob((*job)->pid[0]);
@@ -161,18 +193,18 @@ void wait_fg(jobs **job)
 		}
 
 		else if (WIFSIGNALED(status)) {
-			if (tcsetpgrp(TERMFD, getpid()) < 0)
+			if (!subshell_flag && tcsetpgrp(TERMFD, getpid()) < 0)
 				perror("tcsetpgrp");
-			printf("[%d] (%d) killed by signal %d\n", (*job)->jid, (*job)->pid[0],
+			ss_safe_printf("[%d] (%d) killed by signal %d\n", (*job)->jid, (*job)->pid[0],
 					WTERMSIG(status));
 			deljob((*job)->pid[0]);
 			break;
 		}
 
 		else if (WIFSTOPPED(status)) {
-			if (tcsetpgrp(TERMFD, getpid()) < 0)
+			if (!subshell_flag && tcsetpgrp(TERMFD, getpid()) < 0)
 				perror("tcsetpgrp");
-			printf("[%d] (%d) stopped by signal %d\n", (*job)->jid, 
+			ss_safe_printf("[%d] (%d) stopped by signal %d\n", (*job)->jid,
 					(*job)->pid[0], WSTOPSIG(status));
 			(*job)->state = ST;
 			break;
@@ -185,7 +217,7 @@ void wait_fg(jobs **job)
 void do_bgfg(char **cmd, int state)
 {
 	int status = 0, jid;
-	pid_t pid;	
+	pid_t pid;
 	jobs **job;
 	sigset_t msk;
 
@@ -211,10 +243,10 @@ void do_bgfg(char **cmd, int state)
 			ERR_EXIT("kill");
 
 		if (state == BG) {
-			printf("[%d] (%d) %s\n", (*job)->jid, (*job)->pid[0], (*job)->cmdline);
+			ss_safe_printf("[%d] (%d) %s\n", (*job)->jid, (*job)->pid[0], (*job)->cmdline);
 		}
 		else {
-			printf("%s\n", (*job)->cmdline);
+			ss_safe_printf("%s\n", (*job)->cmdline);
 			wait_fg(job);
 		}
 	}
@@ -229,12 +261,12 @@ void do_bgfg(char **cmd, int state)
 /*
  * All signal handlers of shell solely signals to the jobs, it
  * should not modify the joblist data structure since the handler
- * might be done in a critical section. All signal handlers have 
+ * might be done in a critical section. All signal handlers have
  * SIG_BLOCK mask set to all signals.
  */
 
 /* ctrl+z */
-void sigtstp_handler(int sig)
+static void sigtstp_handler(int sig)
 {
 	jobs **job;
 
@@ -247,7 +279,7 @@ void sigtstp_handler(int sig)
 }
 
 /* ctrl+c */
-void sigint_handler(int sig)
+static void sigint_handler(int sig)
 {
 	jobs **job;
 
@@ -260,7 +292,7 @@ void sigint_handler(int sig)
 }
 
 /* state change of children handled here */
-void sigchld_handler(int sig)
+static void sigchld_handler(int sig)
 {
 	pid_t child_pid;
 	jobs **job;
@@ -282,7 +314,7 @@ void sigchld_handler(int sig)
 		else if (WIFSIGNALED(status)) {
 			job = getjob(child_pid, 0);
 			if (NOTNULL(job)) {
-				printf("\e[0;32mSIGCHLD: \e[00m[%d] (%d) killed by signal %d\n", 
+				ss_safe_printf("\e[0;32mSIGCHLD: \e[00m[%d] (%d) killed by signal %d\n",
 						(*job)->jid, (*job)->pid[0], WTERMSIG(status));
 				deljob(child_pid);
 			}
@@ -292,7 +324,7 @@ void sigchld_handler(int sig)
 			job = getjob(child_pid, 0);
 			if (NOTNULL(job)) {
 				(*job)->state = ST;
-				printf("\e[0;32mSIGCHLD: \e[00m[%d] (%d) stopped by signal %d\n", 
+				ss_safe_printf("\e[0;32mSIGCHLD: \e[00m[%d] (%d) stopped by signal %d\n",
 						(*job)->jid, (*job)->pid[0], WSTOPSIG(status));
 			}
 		}
@@ -307,7 +339,7 @@ void sigchld_handler(int sig)
 }
 
 /* minimal signal init stub */
-void signal_me(int signum, int sa_flags, void (*handler)(int), 
+static void signal_me(int signum, int sa_flags, void (*handler)(int),
 		void(*s_action)(int sig, siginfo_t *sinf, void *context))
 {
 	struct sigaction action;

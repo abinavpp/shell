@@ -11,6 +11,8 @@
 #define FG 2
 #define ST 4
 
+#define START_JOBID 1
+
 #define TERMFD 255
 
 typedef struct jobs {
@@ -43,21 +45,13 @@ typedef struct jobs {
 
 extern void printjobs();
 
-extern jobs **getjob(pid_t pid, int jid);
 extern jobs **addjob(pid_t pid, int state, char **cmd);
-extern jobs **get_fgjob();
-extern jobs **get_lastjob();
 extern void deljob(pid_t pid);
+extern void job_free();
 
 extern void wait_fg(jobs **job);
 extern void do_bgfg(char **cmd, int state);
 
-
-extern void sigtstp_handler(int sig);
-extern void sigint_handler(int sig);
-extern void sigchld_handler(int sig);
-extern void signal_me(int signum, int sa_flags, void (*handler)(int), 
-		void(*s_action)(int sig, siginfo_t *sinf, void *context));
 extern void signal_init();
 
 #endif
