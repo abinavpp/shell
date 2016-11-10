@@ -8,7 +8,7 @@
 /* main alias hash table entries */
 static alias *al_ent[HASH_MAX];
 
-/* 
+/*
  * the following al_lin... functions are operations on
  * a minimal linear data structure used by the parser only
  * for blacklisting. al_trans is not used since we are blacklisting
@@ -33,20 +33,9 @@ void al_lin_free(alias **al_head)
 {
 	alias *walk, *target;
 
-	if (!NOTNULL(al_head))
-		return;
-
-	for (walk=*al_head;;) {
+	for (walk=*al_head; walk;
+			walk=walk->next, free(target->name), free(target)) {
 		target = walk;
-		if (walk->next)
-			walk = walk->next;
-		else {
-			free(target->name);
-			free(target);
-			break;
-		}
-		free(target->name);
-		free(target);
 	}
 	*al_head = NULL;
 }
@@ -76,7 +65,7 @@ static alias **al_src(char *al_name)
 {
 	alias **walk;
 
-	for (walk=&al_ent[hash_fun(al_name)]; 
+	for (walk=&al_ent[hash_fun(al_name)];
 			*walk && strcmp((*walk)->name, al_name);)
 		walk = &((*walk)->next);
 	return walk;
@@ -89,7 +78,7 @@ alias *is_alias(char *al_name)
 	return *(al_src(al_name));
 }
 
-/* 
+/*
  * inserts alias with al_name and al_trans into the alias
  * hash table, if overwriting, al_trans is realloced else
  * the entries are freshly malloced, this call should succeed
@@ -104,7 +93,7 @@ static void al_ins(char *al_name, char *al_trans)
 
 	al_at = al_src(al_name);
 
-	if (*al_at == NULL) {
+	if (!(*al_at)) {
 		if ((*al_at = (alias *)malloc(sizeof(alias))) == NULL)
 			ERR_EXIT("malloc");
 
@@ -129,7 +118,7 @@ static void al_ins(char *al_name, char *al_trans)
 	}
 }
 
-/* removes alias from alias hash table, returns 1 if found & 
+/* removes alias from alias hash table, returns 1 if found &
  * removed OR 0 if not found */
 static int al_del(char *al_name)
 {
@@ -149,6 +138,7 @@ static int al_del(char *al_name)
 	return 0;
 }
 
+/* frees all the aliases hashed alias hash table */
 void al_free()
 {
 	int i;
@@ -194,7 +184,7 @@ void alias_me(char **cmd)
 		; /* skip em bloody spaces made by puny humans */
 
 	/* trailing spaces will be taken care by the parser */
-	al_trans = cmd[1]; 
+	al_trans = cmd[1];
 
 	if (al_name && *al_name) {
 		al_ins(al_name, al_trans); /* alias is hashed in */

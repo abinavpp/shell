@@ -13,7 +13,7 @@ static marks **src_mark(char *name)
 {
 	marks **walk;
 
-	for (walk=&mk_head; NOTNULL(walk) && strcmp((*walk)->name, name);
+	for (walk=&mk_head; *walk && strcmp((*walk)->name, name);
 			walk=&((*walk)->next))
 		;
 	return walk;
@@ -53,18 +53,8 @@ void mark_free()
 {
 	marks *walk, *target;
 
-	if (!mk_head)
-		return;
-
-	for (walk=mk_head;;) {
+	for (walk=mk_head; walk; walk=walk->next ,free(target)) {
 		target = walk;
-		if (walk->next)
-			walk = walk->next;
-		else {
-			free(target);
-			break;
-		}
-		free(target);
 	}
 	mk_head = NULL;
 }
