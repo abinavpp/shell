@@ -30,10 +30,9 @@ $(OBJDIR)%.o		:	%.c $(HDR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 shell	:	$(OBJ)
-	$(CC) $(CFLAGS) $^ -o $@ 
+	$(CC) $(CFLAGS) $^ -o $@
 
 clean 	:
 	@echo -n "Removing [" && ls $(OBJDIR) | xargs echo -n && echo "]"
 	@read -p "Really ? " inp; \
 	[[ $$inp = "y" ]] && rm $(OBJDIR)* || echo "Exiting..."
-	
