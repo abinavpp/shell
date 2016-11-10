@@ -7,6 +7,13 @@
 
 #include "util.h"
 
+char *chrtochr(char *str, int cf, int ct)
+{
+	if ((str = astrchr(str, cf, 1)))
+		*str = ct;
+	return str;
+}
+
 void clean_up(const char *str, ...)
 {
 	va_list ap;
@@ -79,7 +86,6 @@ void repl_str(char *pat, char *rep, char *start_pat)
 		shift_str(start_pat+len_pat, len_diff); /* shift only the stuff after the pattern */
 		astrcpy(start_pat, rep, len_rep, 0); /* just copy the rep without \0 at end */
 	}
-	
 }
 
 char *int_till_txt(char *str, int *res)
