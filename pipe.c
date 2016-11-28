@@ -12,21 +12,24 @@
 #include "util.h"
 #include "jobs.h"
 
-/* parser specific macros */
+/*
+ * parser specific macros
+ */
 #define IS_ESCAPE(c)		((c) == '\\')
 #define IS_CHILD_DELIM(c)	((c) == ' ')
 #define IS_BG_DELIM(c)		((c) == '&')
 #define IS_PIPE_DELIM(c)	((c) == '|')
 #define IS_PARENT_DELIM(c)	((c)=='|' || (c)==';' || (c)=='&')
 #define IS_GRAND_DELIM(c)	((c)=='\n')
-#define IS_QUOTE(c)			((c)=='\'' || (c)=='\"')
-#define IS_SUBSHELL_OPEN(c)	((c) == '(')
-#define IS_SUBSHELL_CLOSE(c)	((c) == ')')
 #define IS_REDIR_DELIM(c)	((c) == '>')
 #define IS_REDIRTOFD_DELIM(inp)		(*(inp)=='&' && *((inp)-1)=='>')
 #define IS_REDIRAPPEND_DELIM(inp)	(*(inp)=='>' && *((inp)-1)=='>')
+#define IS_QUOTE(c)			((c)=='\'' || (c)=='\"')
+#define IS_SUBSHELL_OPEN(c)	((c) == '(')
+#define IS_SUBSHELL_CLOSE(c)	((c) == ')')
 
-#define TERM_DELIM			{'|', ';', '&', '\n'}
+#define TERM_DELIM_INIT		{'|', ';', '&', '\n', '\0'}
+#define SS_DELIM_INIT		{'(', ')'}
 #define CHILD_DELIM			' '
 #define SUBSHELL_OPEN		'('
 #define SUBSHELL_CLOSE		')'
@@ -34,13 +37,25 @@
 #define GRAND_DELIM 		'\n'
 #define PIPE 				'|'
 
-/* parser return flags */
-#define PARSERET_SUBSHELL 1
+/*
+ * flags for parse_cmd
+ */
+#define PARSE_DONTFILLCMD	1 /* dont fill cmd array */
+#define PARSE_WHOLELINE		2 /* parse till GRAND_DELIM only */
+#define PARSE_DONTPRINT		4 /* parser wont print to stdout */
 
-/* preproc_cmdline flags */
-#define PREPRO_CREND	1
-#define PREPRO_TILDEXP	2
+/*
+ * parse_cmd return flags
+ */
+#define PARSERET_SUBSHELL	1
+#define PARSERET_UNCLOSED	2
+#define PARSERET_SYNERR		4
 
+/*
+ * preproc_cmdline flags
+ */
+#define PREPRO_CREND		1 /* append '\n' at end */
+#define PREPRO_NULLBEG		2 /* add '\0' before start */
 
 /* fork_and_exec flags */
 #define FE_REDIR	1	/* redirection */
@@ -71,136 +86,156 @@ static char ps2[PRMT_MAX] = " >";
 /* globbing global member, freed in builtins */
 static glob_t glob_res;
 
-/* pushes inp to end of token and nullifies that byte */
-static void tokenize(char **inp, char *delim)
-{
-
-	for (; ; (*inp)++) {
-		if (IS_QUOTE(**inp) && !IS_ESCAPE(*(*inp-1))) {
-			*inp = astrchr(*inp+1, **inp, 1);
-		}
-
-		if (IS_CHILD_DELIM(**inp) || IS_PARENT_DELIM(**inp) || IS_GRAND_DELIM(**inp)) {
-			*delim = **inp;
-			**inp = '\0'; /* crafted the token */
-			break;
-		}
-	}
-}
-
-static char *strdelimvec(char *str, int c[], int n)
+/*
+ * searches from str len bytes for the first occurence
+ * of any one char in array c of size n. The char is treated
+ * as a special delim, so the ones in quotes and escaped ones
+ * are ignored. returns the location if found, else NULL
+ */
+static char *strdelimvec(char *str, int len, int c[], int n)
 {
 	int i;
+	char *end = str + len;
 
-	for(; str; str++) {
+	for(; str && str<=end; str++) {
 		if (IS_QUOTE(*str) && !IS_ESCAPE(*(str-1))) {
-			str = astrchr(str+1, *str, 1);
+			if (!(str = astrchr(str+1, *str, 1)))
+				break;
 		}
 		else {
-			for (i=0; i<n; i++)
+			for (i=0; i<n; i++) {
 				if (*str == c[i] && !IS_ESCAPE(*(str-1)))
 					return str;
+			}
 		}
 	}
 	return NULL;
 }
 
-static char *strdelim(char *str, int c)
+/* 1 if subshell closed else zero */
+static int is_ss_closed(char **str)
 {
-	for(; str; str++) {
-		if (IS_QUOTE(*str) && !IS_ESCAPE(*(str-1)))
-			str = astrchr(str+1, *str, 1);
-		else if (*str == c && !IS_ESCAPE(*(str-1)))
-			return str;
+	int ss_pair = 1;
+	int ss_delim[] = SS_DELIM_INIT;
+
+	for ((*str)++; (*str = strdelimvec(*str, strlen(*str),
+					ss_delim,sizeof(ss_delim) / sizeof(int)));) {
+		if (**str == SUBSHELL_OPEN)
+			++ss_pair;
+		else if (ss_pair == 1) {
+			ss_pair--;
+			break;
+		}
+		else
+			ss_pair--;
+		(*str)++;
 	}
-	return NULL;
+
+	return ss_pair==0 ? 1 : 0;
 }
 
-/* the start of iterative alias expansion fixed at start_arg location
- * inp and delim will point accordingly but start_arg remains */
-static void aliasize(char *start_arg, char *delim, char **inp)
+/* reinitializes the blacklisting helpers fresh aliasizing */
+static inline void al_reinit_blist()
+{
+	al_deadend = NULL;
+	if (al_blist)
+		al_lin_free(&al_blist);
+}
+
+/* the start of iterative alias expansion fixed at start_arg location.
+ * inp and delim are from parse_cmd since this is closely tied with it */
+static int aliasize(char *start_arg, char *delim, char **inp)
 {
 	int len;
 	alias *al_cur;
 	char al_arg[ARG_MAX] = {0};
 
 	if (start_arg >= al_deadend) {
-		/* no blacklisting since we crossed the deadend, so freeing the list */
-		al_lin_free(&al_blist);
+		/* no blacklisting since we crossed the deadend,
+		 * so freeing the list and al_deadend reinitialized */
+		al_reinit_blist();
 	}
 
-	while (al_cur = is_alias(start_arg )) {
-		if (al_lin_src(al_blist, start_arg) == NULL) {
-			/* this is not a blacklisted one, hence alias it */
-			al_lin_ins(&al_blist, start_arg); /* but from now till deadend it is */
-			len = strlen(start_arg);
-			astrcpy(al_arg, start_arg, len, 1);
-			**inp = *delim; /* so that repl_str works till actual '\0' of cmdline */
-			repl_str(al_arg, al_cur->trans, start_arg);
+	if ((al_cur = is_alias(start_arg )) &&
+		 (al_lin_src(al_blist, start_arg) == NULL)) {
+		/* this is not a blacklisted one, hence alias it */
+		/* but from now till deadend it is */
+		al_lin_ins(&al_blist, start_arg);
 
-			if (al_deadend == NULL)
-				al_deadend = start_arg + strlen(al_cur->trans);
-			else
-				al_deadend = al_deadend + ALIAS_DIFF(al_cur);
+		len = strlen(start_arg);
+		astrcpy(al_arg, start_arg, len, 1);
+		**inp = *delim; /* so that repl_str works till actual
+						   delim of cmdline */
+		repl_str(al_arg, al_cur->trans, start_arg);
 
-			/* this MUST happen so that we leave things how
-			 * the parser wants after expansion */
-			*inp = *inp - len;
-			/*
-			 * the MODIFIED token after alias is delimited with
-			 * '\0'and its following delim becomes the new delim,
-			 *  inp points to end of first token after alias transition
-			*/
-			tokenize(inp, delim);
-		}
-		/* break if aliasing the blacklisted alias */
-		else {
-			break;
-		}
+		if (al_deadend == NULL)
+			al_deadend = start_arg + strlen(al_cur->trans);
+		else
+			al_deadend = al_deadend + ALIAS_DIFF(al_cur);
 	}
+	else {
+		goto dont_aliasize;
+	}
+
+	return 0;
+
+dont_aliasize :
+	return -1;
 }
 
 /*
  * the god-forsaken parser!!!
- * inp references the main input string and this function populates
- * cmd from start_ind. Quoted args of inp will have their leading quote
- * in cmd as an FYI for post_proc, rflags or return flags are not used
- * yet, ss_inp is the future 'inp' of subshell, and if subshell then cmd[0]
- * will have a leading '(' to signal that its a subshell and IT DOESNT
- * POPULATE THE CMD in that case, but makes ss_inp point correctly
+ * inp references the main input string, cmd is the array to be filled
+ * for execve from index start_ind. plflags are parser flags, (see macros
+ * above), and rflags are written as per the outcome of the parsing.
+ * Quoted args have leading quote in the cmd argument as an FYI for
+ * postproc_cmdline. If subshell, then cmd[0] will point to the whole
+ * subshell line, from '(' to ')', as an FYI for fe_or_ss.
+ * Aliasize is also called by this. If everything goes A-ok, then
+ * it returns the delim else -1. Check rflags and return value
+ * all the time.
  */
 static char parse_cmd(char **inp, char **cmd, int start_ind,
-		int *rflags, char **ss_inp)
+		int pflags, int *rflags)
 {
 	int i = start_ind;
 	char delim;
 	char *start_arg;
 
-	if (!inp || !(*inp) || !(**inp))
-		return 0;
+	if (!inp || !(*inp) || !(**inp)) {
+		printf("Godnamit\n");
+		goto hell;
+	}
 
 	while (**inp == ' ')
 		(*inp)++;
 
 	*rflags = 0;
-	for (start_arg=*inp; **inp!='\0'; (*inp)++) {
+	for (start_arg=*inp; *inp; (*inp)++) {
 		if (IS_QUOTE(**inp)) {
 			delim = **inp;
 			/* keeping the leading quote in cmd[i] for post_proc as
 			 * a signal to ignore special characters */
-			cmd[i++] = (*inp);
-			*inp = astrchr((*inp)+1, delim, 1);
-			**inp = '\0';
+			if (!(pflags & PARSE_DONTFILLCMD))
+				cmd[i++] = start_arg;
+			else
+				i++;
+
+			if ((*inp = astrchr((*inp)+1, delim, 1)))
+				**inp = '\0';
+			else
+				goto unclosed;
 			start_arg = *inp + 1;
 		}
-		if (IS_ESCAPE(**inp)) {
+		else if (IS_ESCAPE(**inp)) {
 			if (!IS_GRAND_DELIM(*(*inp+1)))
 				*inp += 1;
-			continue;
+			else
+				goto unclosed;
 		}
-		if (IS_SUBSHELL_OPEN(**inp)) {
+		else if (IS_SUBSHELL_OPEN(**inp)) {
 			char *ss_close;
-			int term_delim[] = TERM_DELIM;
+			int term_delim[] = TERM_DELIM_INIT;
 
 			if (i || *(*inp-1)) {
 				/* die if this not a start of new command */
@@ -218,26 +253,32 @@ static char parse_cmd(char **inp, char **cmd, int start_ind,
 					goto hell;
 			}
 
-			ss_close = strdelim(*inp, SUBSHELL_CLOSE);
-			if (ss_close) {
+			ss_close = *inp;
+			if (is_ss_closed(&ss_close)) {
 				*(ss_close++) = ' ';
-				ss_close = strdelimvec(ss_close, term_delim,
-					   	sizeof(term_delim) / sizeof(int));
+				if (!(ss_close = strdelimvec(ss_close, strlen(ss_close),
+								term_delim,
+								sizeof(term_delim) / sizeof(int))))
+					goto unclosed;
 
 				(*rflags) |= PARSERET_SUBSHELL;
 
-				*ss_inp = *(inp)+1; /* skips leading '(' */
 				delim = *ss_close;
 				*ss_close = '\n'; /* to make subshell happy */
 
 				/* signals that this is a subshell by the leading '('
 				 * from now on , i MUST BE ZERO!!! */
-				cmd[i] = *inp;
+				if (!(pflags & PARSE_DONTFILLCMD))
+					cmd[i++] = *inp;
+				else
+					i++;
 				*inp = ss_close + 1;
-				return delim;
+				goto done;
 			}
+			else
+				goto unclosed;
 		}
-		if (IS_CHILD_DELIM(**inp) || IS_PARENT_DELIM(**inp) || IS_GRAND_DELIM(**inp)) {
+		else if (IS_CHILD_DELIM(**inp) || IS_PARENT_DELIM(**inp) || IS_GRAND_DELIM(**inp)) {
 
 			if (IS_REDIRTOFD_DELIM(*inp))
 				continue;
@@ -254,23 +295,47 @@ static char parse_cmd(char **inp, char **cmd, int start_ind,
 			if (*start_arg) {
 				/* alias only the cmd, ie cmd[0], not its args */
 				if (!i && is_alias(start_arg)) {
-					aliasize(start_arg, &delim, inp);
+					if (aliasize(start_arg, &delim, inp) == 0) {
+						*inp = start_arg - 1;
+						continue;
+					}
 				}
-				cmd[i++] = start_arg;
+				if (!(pflags & PARSE_DONTFILLCMD))
+					cmd[i++] = start_arg;
+				else
+					i++;
 			}
 
 			if (IS_PARENT_DELIM(delim) || IS_GRAND_DELIM(delim)) {
-				(*inp)++;
-				break;
+
+				if (!(pflags&PARSE_WHOLELINE) || IS_GRAND_DELIM(delim)) {
+					(*inp)++;
+					goto done;
+				}
 			}
 			start_arg = *inp + 1;
 		}
 	}
-	cmd[i] = NULL; /* to make argvp happy */
+done :
+	if (!(pflags & PARSE_DONTFILLCMD))
+		cmd[i] = NULL; /* to make argvp happy */
+#ifdef DEBUG_ON
+	for (i=0; cmd[i]; i++)
+		printf("%s|", cmd[i]);
+	printf("%s with delim %d\n", "NULL", delim);
+#endif
 	return delim; /* for verifying if this to be piped or bg'd etc */
 
+unclosed :
+	(*rflags) |= PARSERET_UNCLOSED;
+	if (!(pflags & PARSE_DONTPRINT))
+		fprintf(stderr, "SHELL : cmdline unclosed\n");
+	return -1;
+
 hell:
-	fprintf(stderr, "SHELL syntax error \n");
+	(*rflags) |= PARSERET_SYNERR;
+	if (!(pflags & PARSE_DONTPRINT))
+		fprintf(stderr, "SHELL : syntax error\n");
 	return -1;
 }
 
@@ -286,7 +351,7 @@ static void postproc_cmdline(char **cmd)
 		}
 
 		else {
-			glob(*cmd, 0, NULL, &glob_res);
+			glob(*cmd, GLOB_TILDE | GLOB_BRACE, NULL, &glob_res);
 			if (glob_res.gl_pathc > 0) {
 				/* we got matching files/dir with wildcard */
 				for (i=1, after_glob = cmd+glob_res.gl_pathc;
@@ -321,6 +386,8 @@ static void shell_init()
 	if (fcntl(TERMFD, F_SETFD, FD_CLOEXEC) < 0)
 		ERR_EXIT("fcntl");
 	signal_init();
+	setpgid(0, 0);
+	tcsetpgrp(TERMFD, getpid());
 }
 
 /* @ death of shell */
@@ -373,27 +440,26 @@ static void do_redir(char **cmd)
 
 	while (NOTNULL(cmd)) {
 		redir_tok = int_till_txt(*cmd, &redir_fd);
-		if (redir_fd >= 1) {
-			if (IS_REDIR_DELIM(*(redir_tok++))) {
+		if (redir_fd >= 1 && IS_REDIR_DELIM(*(redir_tok++))) {
 
-				if (IS_REDIRTOFD_DELIM(redir_tok)) {
-					int_till_txt(redir_tok+1, &redir_tofd);
-					if (!redir_tofd || dup2(redir_tofd, redir_fd) < 0)
-						ERRMSG("Error redirecting\n");
-				}
-				else {
-				/* redir_dst can be filename or can be
-				 * NULL(which will fail at redir_me) */
-					redir_dst = *(cmd+1);
-					ap_flag = IS_REDIRAPPEND_DELIM(redir_tok)
-					   	? 1 : 0;
-					/* append flag and dst set */
-					redir_me(redir_fd, redir_dst, ap_flag);
-				}
-				if (null_flag) {
-						*cmd = NULL;
-						null_flag = 0;
-				}
+			if (IS_REDIRTOFD_DELIM(redir_tok)) {
+				int_till_txt(redir_tok+1, &redir_tofd);
+
+				if (!redir_tofd || dup2(redir_tofd, redir_fd) < 0)
+					ERRMSG("Error redirecting\n");
+			}
+			/* redir_dst can be filename or can be
+			 * NULL(which will fail at redir_me) */
+			else {
+				redir_dst = *(cmd+1);
+				ap_flag = IS_REDIRAPPEND_DELIM(redir_tok)
+					? 1 : 0;
+				/* append flag and dst set */
+				redir_me(redir_fd, redir_dst, ap_flag);
+			}
+			if (null_flag) {
+				*cmd = NULL;
+				null_flag = 0;
 			}
 		}
 		cmd = cmd+1; /* next arg */
@@ -416,8 +482,6 @@ static void do_cd(char **cmd)
 /* does shell builtins, hopefully */
 static int builtin(char **cmd)
 {
-	int err;
-
 	if (cmd[0]) {
 		switch (*cmd[0]) {
 		case 'a' :
@@ -508,9 +572,10 @@ static pid_t fork_and_exec(char **cmd, int flags,
 		pid_t pgid, sigset_t msk)
 {
 	pid_t pid;
-	pid_t p = 0;
 
 	if (subshell_flag) {
+		/* if subshell then every forks belong to the same pg
+		 * sharing the same terminal */
 		flags &= ~(FE_SETTERM|FE_SETPG);
 	}
 	pid = fork();
@@ -518,6 +583,7 @@ static pid_t fork_and_exec(char **cmd, int flags,
 	case -1 :
 		ERR_EXIT("fork");
 		break;
+
 	case 0  :
 		SIG_TGL(SIGTTOU, SIG_DFL);
 		SIG_TGL(SIGTTIN, SIG_DFL);
@@ -547,9 +613,15 @@ static pid_t fork_and_exec(char **cmd, int flags,
 				 perror("setpgid");
 		}
 
-		execvp(cmd[0], cmd);
-		ERR_EXIT("execvp");
+		if (cmd[0]) {
+			if (execvp(cmd[0], cmd) < 0)
+				ERR_EXIT("execvp");
+		}
+		else{
+			_exit(EXIT_SUCCESS);
+		}
 		break;
+
 	default :
 		/*
 		 * force setpgid here, sometimes the parent, ie the shell,
@@ -571,6 +643,8 @@ static pid_t fork_and_exec(char **cmd, int flags,
 }
 
 static void eval(char *);
+/* subshell is just a simple fork and a call to eval,
+ * the forked shell will have the global subshell_flag set to one */
 static pid_t run_subshell(char *ss_inp, int flags, pid_t pgid)
 {
 	pid_t pid;
@@ -618,13 +692,14 @@ static pid_t run_subshell(char *ss_inp, int flags, pid_t pgid)
 	return pid;
 }
 
-static pid_t fe_or_ss(char **cmd, char *ss_inp,
+/* fork_and_exec or run_subshell as per the 1st char of cmd[0] */
+static pid_t fe_or_ss(char **cmd,
 		int flags, pid_t pgid, sigset_t msk)
 {
 	if (!NOTNULL(cmd))
 		return -1;
 	if (*cmd[0] == SUBSHELL_OPEN) {
-		return run_subshell(ss_inp, flags, pgid);
+		return run_subshell(cmd[0] + 1, flags, pgid);
 	}
 	else {
 		return fork_and_exec(cmd, flags, pgid, msk);
@@ -632,11 +707,10 @@ static pid_t fe_or_ss(char **cmd, char *ss_inp,
 }
 
 /* regular fork and exec routine with a shell twist */
-static void exec_me(char **cmd, char *ss_inp, int state)
+static void exec_me(char **cmd, int state)
 {
 	pid_t pid;
 	jobs **job;
-	int status;
 	sigset_t  msk;
 
 	if (!cmd || !(*cmd) || !(**cmd))
@@ -647,7 +721,7 @@ static void exec_me(char **cmd, char *ss_inp, int state)
 
 	MASK_SIG(SIG_BLOCK, SIGCHLD, msk);
 
-	pid = fe_or_ss(cmd, ss_inp,
+	pid = fe_or_ss(cmd,
 			(state == FG) ? FE_ALL : (FE_ALL^FE_SETTERM), 0, msk);
 	job = addjob(pid, state, cmd);
 
@@ -655,14 +729,15 @@ static void exec_me(char **cmd, char *ss_inp, int state)
 		wait_fg(job);
 	}
 	else {
-		printf("[%d] %d\t%s\n",(*job)->jid, (*job)->pid[0], (*job)->cmdline);
+		shell_printf(SHELLPRINT_CHKSS | SHELLPRINT_CHKTERM,
+				"[%d] %d\t%s\n",(*job)->jid, (*job)->pid[0], (*job)->cmdline);
 	}
 
 	MASK_SIG(SIG_UNBLOCK, SIGCHLD, msk);
 }
 
 /* piper */
-static void pipe_me(char **cmd, char **inp, char *ss_inp, char *delim)
+static void pipe_me(char **cmd, char **inp, char *delim)
 {
 	int pipe_fd[2], stdin_fd, stdout_fd, i, parse_rflags = 0;
 	char pipe_cmds[ARG_MAX];
@@ -688,11 +763,11 @@ static void pipe_me(char **cmd, char **inp, char *ss_inp, char *delim)
 		clean_up("f", pipe_fd[1]);
 
 		if (!pgid) {
-			pgid = fe_or_ss(cmd, ss_inp, FE_ALL, 0, msk);
+			pgid = fe_or_ss(cmd, FE_ALL, 0, msk);
 			job = addjob(pgid, FG, cmd); /* so (*job)->pid[0] = pgid */
 		}
 		else {
-			(*job)->pid[++i] = fe_or_ss(cmd, ss_inp, FE_ALL^FE_SETTERM, pgid, msk);
+			(*job)->pid[++i] = fe_or_ss(cmd, FE_ALL^FE_SETTERM, pgid, msk);
 			strcat((*job)->cmdline, " | ");
 			stringify(pipe_cmds, cmd);
 			strcat((*job)->cmdline, pipe_cmds);
@@ -702,13 +777,13 @@ static void pipe_me(char **cmd, char **inp, char *ss_inp, char *delim)
 			ERR_EXIT("dup2");
 		clean_up("f", pipe_fd[0]);
 
-		*delim = parse_cmd(inp, cmd, 0, &parse_rflags, &ss_inp);
+		*delim = parse_cmd(inp, cmd, 0, 0, &parse_rflags);
 	}
 	/* restores the orig stdout for the final exec */
 	if (dup2(stdout_fd, STDOUT_FILENO) < 0) {
 		ERR_EXIT("dup2");
 	}
-	(*job)->pid[++i] = fe_or_ss(cmd, ss_inp, FE_ALL^FE_SETTERM, pgid, msk);
+	(*job)->pid[++i] = fe_or_ss(cmd, FE_ALL^FE_SETTERM, pgid, msk);
 	strcat((*job)->cmdline, " | ");
 	stringify(pipe_cmds, cmd);
 	strcat((*job)->cmdline, pipe_cmds);
@@ -727,66 +802,48 @@ static void pipe_me(char **cmd, char **inp, char *ss_inp, char *delim)
 static void eval(char *inp)
 {
 	char *cmd[ARG_MAX] = {0}; /* main cmd array for exec */
-	char *ss_inp; /* the 'inp' for subshell if any */
 	char delim; /* delim between cmds */
 	int parse_rflags = 0; /* maybe useful in the future */
 
+#ifdef DEBUG_ON
+	printf("%d evaluating ", getpid());
+	prints(inp);
+#endif
 	do {
-		ss_inp = NULL;
-		if ((delim = parse_cmd(&inp, cmd, 0, &parse_rflags, &ss_inp)) == PIPE) {
-			pipe_me(cmd, &inp, ss_inp, &delim);
+		parse_rflags = 0;
+		if ((delim = parse_cmd(&inp, cmd, 0, 0, &parse_rflags)) == PIPE) {
+			pipe_me(cmd, &inp, &delim);
 		}
 		else if (delim == -1) {
-			goto fin;
+			break;
 		}
 		else {
-			exec_me(cmd, ss_inp,IS_BG_DELIM(delim) ? BG : FG);
+			exec_me(cmd,IS_BG_DELIM(delim) ? BG : FG);
 		}
 
 	} while (!IS_GRAND_DELIM(delim) && !IS_GRAND_DELIM(*inp));
 	/* main cmdline end in '\n' , i guess.. */
-fin :
-	al_deadend = NULL; /* re-initiating it for a new cmdline */
-	if (al_blist)
-		al_lin_free(&al_blist);
+
+	al_reinit_blist();
 }
 
 /* for checking if PS2 is required, returns true on unclosed quotes,
  * subshells, escaped \n */
 static int is_closed(char *str)
 {
-	for (; !IS_GRAND_DELIM(*str); str++) {
-		if (IS_QUOTE(*str) && !IS_ESCAPE(*(str-1))) {
-			if ((str=astrchr(str+1, *str, 1)) == NULL)
-				return 0;
-		}
-		else if (IS_SUBSHELL_OPEN(*str) && !IS_ESCAPE(*(str-1))) {
-			if ((str=astrchr(str+1, SUBSHELL_CLOSE, 1)) == NULL)
-				return 0;
-		}
+
+	char cmd[LINE_MAX + 1] = {0};
+	char *cmdline = cmd + 1;
+	int parse_rflags = 0;
+
+	astrcpy(cmdline, str, strlen(str), 1);
+	al_reinit_blist();
+	if (parse_cmd(&cmdline, NULL, 0, PARSE_DONTFILLCMD|PARSE_WHOLELINE
+				|PARSE_DONTPRINT,&parse_rflags) == -1) {
+		if (parse_rflags & PARSERET_UNCLOSED)
+			return 0;
 	}
-	return IS_ESCAPE(*(str-1)) ? 0 : 1;
-}
-
-/* ~ becomes $HOME not quoted ~ or \~ */
-static void tilde_exp(char *inp)
-{
-	char home[PATH_MAX] = {0};
-	int home_l;
-
-	astrcpy(home, getenv("HOME"), strlen(getenv("HOME")), 1);
-	home_l = strlen(home);
-
-	for (; NOTNULL(inp); inp++) {
-		if (IS_QUOTE(*inp) && !IS_ESCAPE(*(inp-1))) {
-			inp = astrchr(inp+1, *inp, 1);
-			continue;
-		}
-		if (*inp == '~' && !IS_ESCAPE(*(inp-1))) {
-			repl_str("~", home, inp);
-			inp += home_l - 1;
-		}
-	}
+	return 1;
 }
 
 /* eats trailing spaces and calls tilde expansion */
@@ -795,39 +852,51 @@ static void preproc_cmdline(char *inp, int flags)
 	char *i;
 
 	if (flags & PREPRO_CREND) {
-		for (i=inp + (strlen(inp)-2); *i==' '; i--)
+		for (i=inp + (strlen(inp)-1); *i==' '; i--)
 			;
-		*(i+1) = GRAND_DELIM;
+		if (*i)
+			*(i+1) = GRAND_DELIM;
+		else
+			*i = GRAND_DELIM;
 	}
-	if (flags & PREPRO_TILDEXP)
-		tilde_exp(inp);
+
+	if (flags & PREPRO_NULLBEG) {
+		*(inp - 1) = 0;
+	}
 }
 
 static void prompt()
 {
-	char cmdline[LINE_MAX] = {0}; /* main command line */
+	char cmdline[LINE_MAX + 1] = {0}; /* main command line */
 	char *inp; /* points to where input is done on main command line */
 
-	inp = cmdline;
+	inp = cmdline + 1; /* ok, I am scared about parsing */
 
 	while (1) {
-		printf("%s", ps1);
+		if (isatty(STDIN_FILENO))
+			printf("%s", ps1);
+
 		fgets(inp, LINE_MAX, stdin);
-		while (!is_closed(cmdline)) {
+		while (!is_closed(cmdline + 1)) {
+			if (!isatty(STDIN_FILENO))
+				break;
 			if ((inp = strchr(inp, GRAND_DELIM)) && IS_ESCAPE(*(inp-1)))
 				inp--;
 			printf("%s", ps2);
 			fgets(inp, LINE_MAX, stdin);
 		}
-		inp = cmdline;
-		preproc_cmdline(inp, PREPRO_TILDEXP|PREPRO_CREND);
+		inp = cmdline + 1;
+		preproc_cmdline(inp, PREPRO_CREND | PREPRO_NULLBEG);
 		eval(inp);
-		memset(inp, 0, LINE_MAX);
+		memset(cmdline, 0, LINE_MAX);
+
+		if (!isatty(STDIN_FILENO))
+			break;
 	}
 
 }
 
-void main()
+int main()
 {
 	shell_init();
 	prompt();
