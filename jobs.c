@@ -112,11 +112,11 @@ jobs **addjob(pid_t pid, int state, char **cmd)
 	(*job)->jid = jid;
 	(*job)->state = state;
 	/* this is bloody important, NEVER rely on the fact that next will
-	 * point to NULL by default, speaking from experience! >:( */
+	 * point to NULL , mallocs are not zeroed! >:( */
 	(*job)->next = NULL;
 	astrcpy((*job)->cmdline, cmdline, strlen(cmdline), 1);
 	/* \n appears if subshell, so replacing it with ')' */
-	if (eocmd=chrtochr((*job)->cmdline, '\n', ')'))
+	if ((eocmd = chrtochr((*job)->cmdline, '\n', ')')))
 		*(eocmd+1) = '\0';
 
 	return job;
@@ -129,9 +129,6 @@ void deljob(pid_t pid)
 	jobs **job, *target;
 
 	job = getjob(pid, 0);
-
-	/* if (!job || !(*job)) */
-		/* return; */
 
 	/* getjob can return (job **)NULL or &(job *)NULL */
 	if (NOTNULL(job)) {
@@ -155,14 +152,21 @@ void job_free()
 }
 
 /* prints only if not a subshell */
-static void ss_safe_printf(char *fmt, ...)
+void shell_printf(int flags, const char *fmt, ...)
 {
 	va_list ap;
 
-	if (!subshell_flag) {
-		va_start(ap, fmt);
-		vprintf(fmt, ap);
+	if (flags & SHELLPRINT_CHKSS) {
+		if (subshell_flag)
+			return;
 	}
+	if (flags & SHELLPRINT_CHKTERM) {
+		if (!isatty(STDIN_FILENO))
+			return;
+	}
+
+	va_start(ap, fmt);
+	vprintf(fmt, ap);
 }
 
 /*
@@ -195,7 +199,8 @@ void wait_fg(jobs **job)
 		else if (WIFSIGNALED(status)) {
 			if (!subshell_flag && tcsetpgrp(TERMFD, getpid()) < 0)
 				perror("tcsetpgrp");
-			ss_safe_printf("[%d] (%d) killed by signal %d\n", (*job)->jid, (*job)->pid[0],
+			shell_printf(SHELLPRINT_CHKSS | SHELLPRINT_CHKTERM,
+					"[%d] (%d) killed by signal %d\n", (*job)->jid, (*job)->pid[0],
 					WTERMSIG(status));
 			deljob((*job)->pid[0]);
 			break;
@@ -204,7 +209,8 @@ void wait_fg(jobs **job)
 		else if (WIFSTOPPED(status)) {
 			if (!subshell_flag && tcsetpgrp(TERMFD, getpid()) < 0)
 				perror("tcsetpgrp");
-			ss_safe_printf("[%d] (%d) stopped by signal %d\n", (*job)->jid,
+			shell_printf(SHELLPRINT_CHKSS | SHELLPRINT_CHKTERM,
+					"[%d] (%d) stopped by signal %d\n", (*job)->jid,
 					(*job)->pid[0], WSTOPSIG(status));
 			(*job)->state = ST;
 			break;
@@ -216,8 +222,6 @@ void wait_fg(jobs **job)
 /* what >bg and >fg run */
 void do_bgfg(char **cmd, int state)
 {
-	int status = 0, jid;
-	pid_t pid;
 	jobs **job;
 	sigset_t msk;
 
@@ -243,10 +247,12 @@ void do_bgfg(char **cmd, int state)
 			ERR_EXIT("kill");
 
 		if (state == BG) {
-			ss_safe_printf("[%d] (%d) %s\n", (*job)->jid, (*job)->pid[0], (*job)->cmdline);
+			shell_printf(SHELLPRINT_CHKSS | SHELLPRINT_CHKTERM,
+					"[%d] (%d) %s\n", (*job)->jid, (*job)->pid[0], (*job)->cmdline);
 		}
 		else {
-			ss_safe_printf("%s\n", (*job)->cmdline);
+			shell_printf(SHELLPRINT_CHKSS | SHELLPRINT_CHKTERM,
+					"%s\n", (*job)->cmdline);
 			wait_fg(job);
 		}
 	}
@@ -314,7 +320,8 @@ static void sigchld_handler(int sig)
 		else if (WIFSIGNALED(status)) {
 			job = getjob(child_pid, 0);
 			if (NOTNULL(job)) {
-				ss_safe_printf("\e[0;32mSIGCHLD: \e[00m[%d] (%d) killed by signal %d\n",
+				shell_printf(SHELLPRINT_CHKSS | SHELLPRINT_CHKTERM,
+						"\e[0;32mSIGCHLD: \e[00m[%d] (%d) killed by signal %d\n",
 						(*job)->jid, (*job)->pid[0], WTERMSIG(status));
 				deljob(child_pid);
 			}
@@ -324,7 +331,8 @@ static void sigchld_handler(int sig)
 			job = getjob(child_pid, 0);
 			if (NOTNULL(job)) {
 				(*job)->state = ST;
-				ss_safe_printf("\e[0;32mSIGCHLD: \e[00m[%d] (%d) stopped by signal %d\n",
+				shell_printf(SHELLPRINT_CHKSS | SHELLPRINT_CHKTERM,
+						"\e[0;32mSIGCHLD: \e[00m[%d] (%d) stopped by signal %d\n",
 						(*job)->jid, (*job)->pid[0], WSTOPSIG(status));
 			}
 		}

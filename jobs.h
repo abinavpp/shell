@@ -15,6 +15,9 @@
 
 #define TERMFD 255
 
+#define SHELLPRINT_CHKSS	1
+#define SHELLPRINT_CHKTERM	1
+
 typedef struct jobs {
 	pid_t pid[PIPE_MAX];
 	int jid;
@@ -40,7 +43,7 @@ typedef struct jobs {
 	if (sigaction((sig), &(struct sigaction){		\
 				.sa_handler=(act)}, NULL) < 0)		\
 		ERR_EXIT("sigaction");						\
-	}while(0);										
+	}while(0);
 
 
 extern void printjobs();
@@ -53,5 +56,7 @@ extern void wait_fg(jobs **job);
 extern void do_bgfg(char **cmd, int state);
 
 extern void signal_init();
+
+extern void shell_printf(int flags, const char *fmt, ...);
 
 #endif
