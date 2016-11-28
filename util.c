@@ -63,7 +63,7 @@ char *astrchr(char *str, int c, int esc_flag)
 	return str;
 }
 
-void shift_str(char *str, int n)
+static inline void shift_str(char *str, int n)
 {
 	char temp_str[strlen(str)]; /* stores orig str */
 
@@ -74,7 +74,7 @@ void shift_str(char *str, int n)
 	}
 }
 
-void repl_str(char *pat, char *rep, char *start_pat)
+void repl_str(const char *pat, const char *rep, char *start_pat)
 {
 	int len_pat , len_rep, len_diff;
 
@@ -110,4 +110,18 @@ void stringify(char *dst, char **src)
 		if (NOTNULL(src+1))
 			astrcpy(dst++, " ", 1, 1);
 	}
+}
+
+void prints(char *str)
+{
+	for (; NOTNULL(str); str++) {
+		if (*str == '\n')
+			printf("\\n");
+		else if (*str == '\t')
+			printf("\\t");
+		else
+			printf("%c", *str);
+
+	}
+	printf("\n");
 }

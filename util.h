@@ -32,11 +32,11 @@
 extern char *chrtochr(char *str, int cf, int ct);
 extern char *int_till_txt(char *inp, int *res);
 extern int hash_fun(char *inp);
-extern void shift_str(char *str, int n);
-extern void repl_str(char *pat, char *rep, char *start_pat);
+extern void repl_str(const char *pat, const char *rep, char *start_pat);
 extern void astrcpy(char *dst, const char *src, int len, char null_flag);
 extern char *astrchr(char *str, int c, int esc_flag);
 extern void clean_up(const char *str, ...);
 extern void stringify(char *dst, char **src);
+extern void prints(char *str);
 
 #endif
