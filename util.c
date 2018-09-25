@@ -123,5 +123,4 @@ void prints(char *str)
 			printf("%c", *str);
 
 	}
-	printf("\n");
 }

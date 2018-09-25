@@ -186,7 +186,7 @@ dont_aliasize :
 /*
  * the god-forsaken parser!!!
  * inp references the main input string, cmd is the array to be filled
- * for execve from index start_ind. plflags are parser flags, (see macros
+ * for execve from index start_ind. pflags are parser flags, (see macros
  * above), and rflags are written as per the outcome of the parsing.
  * Quoted args have leading quote in the cmd argument as an FYI for
  * postproc_cmdline. If subshell, then cmd[0] will point to the whole
@@ -320,9 +320,15 @@ done :
 	if (!(pflags & PARSE_DONTFILLCMD))
 		cmd[i] = NULL; /* to make argvp happy */
 #ifdef DEBUG_ON
-	for (i=0; cmd[i]; i++)
-		printf("%s|", cmd[i]);
-	printf("%s with delim %d\n", "NULL", delim);
+	if (!(pflags & PARSE_DONTFILLCMD) &&
+			!(pflags & PARSE_DONTPRINT)) {
+		printf("%d "TERMSTR_GREEN("parse_cmd : "), getpid());
+		for (int j=0; cmd[j]; j++) {
+			prints(cmd[j]);
+			printf("|");
+		}
+		printf("%s with delim %d\n", "NULL", delim);
+	}
 #endif
 	return delim; /* for verifying if this to be piped or bg'd etc */
 
@@ -411,14 +417,14 @@ static void redir_me(int redir_fd, char *redir_dst, int ap_flag)
 	}
 
 	if (!ap_flag) {/* don't append the output */
-		if ((dst_fd=creat(redir_dst, 0644)) < 0) {
+		if ((dst_fd = creat(redir_dst, 0644)) < 0) {
 			ERR("creat");
 			return;
 		}
 	}
 
 	else {/* append the output */
-		if ((dst_fd=open(redir_dst, O_RDWR | O_APPEND)) < 0) {
+		if ((dst_fd = open(redir_dst, O_RDWR | O_APPEND)) < 0) {
 			ERR("open");
 			return;
 		}
@@ -429,7 +435,10 @@ static void redir_me(int redir_fd, char *redir_dst, int ap_flag)
 		ERR_EXIT("dup2");
 	}
 
-	clean_up("f", dst_fd);
+	/* the temporary dst_fd can sometimes be the redir_fd, think about
+	 * 3>, dst_fd most cases will be 3, in that case dont't close it! */
+	if (dst_fd != redir_fd)
+		clean_up("f", dst_fd);
 }
 
 /* sets up the fds for the current cmd to be exec'd */
@@ -612,6 +621,13 @@ static pid_t fork_and_exec(char **cmd, int flags,
 			 if (setpgid(0, pgid) < 0)
 				 perror("setpgid");
 		}
+#ifdef DEBUG_ON
+	printf("%d "TERMSTR_RED("fork_and_exec : "), getpid());
+	for (int j=0; cmd[j]; j++)
+		printf("%s|", cmd[j]);
+	printf("NULL\n");
+#endif
+
 
 		if (cmd[0]) {
 			if (execvp(cmd[0], cmd) < 0)
@@ -739,7 +755,7 @@ static void exec_me(char **cmd, int state)
 /* piper */
 static void pipe_me(char **cmd, char **inp, char *delim)
 {
-	int pipe_fd[2], stdin_fd, stdout_fd, i, parse_rflags = 0;
+	int pipe_fd[2], i, parse_rflags = 0;
 	char pipe_cmds[ARG_MAX];
 	pid_t pgid = 0;
 	sigset_t msk;
@@ -748,9 +764,6 @@ static void pipe_me(char **cmd, char **inp, char *delim)
 	if (!cmd || !(*cmd) || !(**cmd)) {
 		return;
 	}
-
-	stdin_fd = dup(STDIN_FILENO); /* saves the orig stdin */
-	stdout_fd = dup(STDOUT_FILENO); /* saves the orig stdout */
 
 	MASK_SIG(SIG_BLOCK, SIGCHLD, msk);
 
@@ -780,7 +793,7 @@ static void pipe_me(char **cmd, char **inp, char *delim)
 		*delim = parse_cmd(inp, cmd, 0, 0, &parse_rflags);
 	}
 	/* restores the orig stdout for the final exec */
-	if (dup2(stdout_fd, STDOUT_FILENO) < 0) {
+	if (dup2(TERMFD, STDOUT_FILENO) < 0) {
 		ERR_EXIT("dup2");
 	}
 	(*job)->pid[++i] = fe_or_ss(cmd, FE_ALL^FE_SETTERM, pgid, msk);
@@ -789,13 +802,11 @@ static void pipe_me(char **cmd, char **inp, char *delim)
 	strcat((*job)->cmdline, pipe_cmds);
 	(*job)->pid[++i] = 0;
 
-	if (dup2(stdin_fd, STDIN_FILENO) < 0) { /* restores the orig stdin*/
+	if (dup2(TERMFD, STDIN_FILENO) < 0) { /* restores the orig stdin*/
 		ERR_EXIT("dup2");
 	}
 	wait_fg(job);
 	MASK_SIG(SIG_UNBLOCK, SIGCHLD, msk);
-
-	clean_up("ff", stdin_fd, stdout_fd);
 }
 
 /* where it all starts */
@@ -806,8 +817,9 @@ static void eval(char *inp)
 	int parse_rflags = 0; /* maybe useful in the future */
 
 #ifdef DEBUG_ON
-	printf("%d evaluating ", getpid());
+	printf("%d "TERMSTR_YELLOW("eval : "), getpid());
 	prints(inp);
+	printf("\n");
 #endif
 	do {
 		parse_rflags = 0;
@@ -877,6 +889,7 @@ static void prompt()
 			printf("%s", ps1);
 
 		fgets(inp, LINE_MAX, stdin);
+
 		while (!is_closed(cmdline + 1)) {
 			if (!isatty(STDIN_FILENO))
 				break;
@@ -885,6 +898,7 @@ static void prompt()
 			printf("%s", ps2);
 			fgets(inp, LINE_MAX, stdin);
 		}
+
 		inp = cmdline + 1;
 		preproc_cmdline(inp, PREPRO_CREND | PREPRO_NULLBEG);
 		eval(inp);

@@ -3,11 +3,16 @@
 
 #include <unistd.h>
 
-#define HASH_MAX 		100
+#define HASH_MAX 		101
 #define PRMT_MAX		128
 #define ARG_MAX			256
 #define PATH_MAX		4096
 #define LINE_MAX		4096
+
+#define TERMSTR_RED(s)		"\e[0;31m"s"\e[00m"
+#define TERMSTR_GREEN(s)	"\e[0;32m"s"\e[00m"
+#define TERMSTR_YELLOW(s)	"\e[0;33m"s"\e[00m"
+#define TERMSTR_BLUE(s)		"\e[0;34m"s"\e[00m"
 
 #define NOTNULL(dptr) ((dptr) && (*(dptr)))
 #define STRINGIZE(c) #c

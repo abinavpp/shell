@@ -1,3 +1,4 @@
+
 #ifndef ALIASH
 #define ALIASH
 
@@ -8,6 +9,7 @@ typedef struct alias {
 } alias;
 
 #define ALIAS_DIFF(al)	(strlen((al)->trans) - strlen((al)->name))
+#define ALIAS_HASH_MAX (HASH_MAX)
 
 extern void al_lin_ins(alias **al_at, char *al_name);
 extern void al_lin_free(alias **al_head);

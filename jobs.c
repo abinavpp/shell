@@ -321,7 +321,7 @@ static void sigchld_handler(int sig)
 			job = getjob(child_pid, 0);
 			if (NOTNULL(job)) {
 				shell_printf(SHELLPRINT_CHKSS | SHELLPRINT_CHKTERM,
-						"\e[0;32mSIGCHLD: \e[00m[%d] (%d) killed by signal %d\n",
+						TERMSTR_GREEN("SIGCHLD: ")"[%d] (%d) killed by signal %d\n",
 						(*job)->jid, (*job)->pid[0], WTERMSIG(status));
 				deljob(child_pid);
 			}
@@ -332,7 +332,7 @@ static void sigchld_handler(int sig)
 			if (NOTNULL(job)) {
 				(*job)->state = ST;
 				shell_printf(SHELLPRINT_CHKSS | SHELLPRINT_CHKTERM,
-						"\e[0;32mSIGCHLD: \e[00m[%d] (%d) stopped by signal %d\n",
+						TERMSTR_GREEN("SIGCHLD : ")"[%d] (%d) stopped by signal %d\n",
 						(*job)->jid, (*job)->pid[0], WSTOPSIG(status));
 			}
 		}

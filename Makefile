@@ -33,6 +33,7 @@ install : all
 	@mv shell $(INSTALLDIR)
 	@echo installed in $(INSTALLDIR)
 
+# $(OBJDIR)%.o		:	%.c %.h
 $(OBJDIR)%.o		:	%.c $(HDR)
 	@[[ -d $(OBJDIR) ]] || mkdir $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@

@@ -6,7 +6,7 @@
 #include "util.h"
 
 /* main alias hash table entries */
-static alias *al_ent[HASH_MAX];
+static alias *al_ent[ALIAS_HASH_MAX];
 
 /*
  * the following al_lin... functions are operations on
